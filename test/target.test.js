@@ -1,0 +1,28 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { resolveTarget } from '../src/target.js';
+
+test('a site URL names its relay, network and room', () => {
+  assert.deepEqual(
+    resolveTarget('https://decentralize.ooo/?network=network%3Atest&room=room-1'),
+    { site: 'https://decentralize.ooo/?network=network%3Atest&room=room-1', signalUrl: 'wss://decentralize.ooo/ws', network: 'network:test', room: 'room-1' },
+  );
+  const page = resolveTarget('https://peer.ooo/?networkName=n1&sessionId=s1');
+  assert.equal(page.network, 'n1');
+  assert.equal(page.room, 's1');
+  assert.equal(resolveTarget('http://127.0.0.1:8788/').signalUrl, 'ws://127.0.0.1:8788/ws');
+  assert.equal(resolveTarget('decentralize.ooo').signalUrl, 'wss://decentralize.ooo/ws');
+});
+
+test('a tunnel address keeps its /t/<node id> prefix', () => {
+  const id = 'a'.repeat(64);
+  assert.equal(resolveTarget(`https://peer.ooo/t/${id}/?room=r`).signalUrl, `wss://peer.ooo/t/${id}/ws`);
+});
+
+test('a relay URL, an explicit relay, and overrides', () => {
+  assert.equal(resolveTarget('wss://decentralize.ooo/ws').signalUrl, 'wss://decentralize.ooo/ws');
+  assert.equal(resolveTarget('https://x.example/?signalingServer=wss://peer.ooo/ws').signalUrl, 'wss://peer.ooo/ws');
+  const t = resolveTarget('https://x.example/?network=a&room=b', { network: 'c', room: 'd', signal: 'ws://127.0.0.1:1/ws' });
+  assert.deepEqual([t.network, t.room, t.signalUrl], ['c', 'd', 'ws://127.0.0.1:1/ws']);
+  assert.deepEqual([resolveTarget('https://x.example/').network, resolveTarget('https://x.example/').room], ['network:test', 'room:test']);
+});
