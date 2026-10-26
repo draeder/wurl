@@ -88,7 +88,9 @@ export function resolveTarget(input, overrides = {}) {
   return {
     topology: resolveTopology(params, overrides),
     site: url.toString(),
-    signalUrl,
+    signalUrl: signalUrl.split(',')[0].trim(),
+    // --signal a,b,c spreads the peers over several relays: peer i uses signalUrls[i % n].
+    signalUrls: signalUrl.split(',').map((value) => value.trim()).filter(Boolean),
     network: overrides.network || first(params, ['network', 'networkName', 'network_id', 'networkId']) || DEFAULT_NETWORK,
     room: overrides.room || first(params, ['room', 'sessionId', 'room_id', 'roomId', 'session_id']) || DEFAULT_ROOM,
   };

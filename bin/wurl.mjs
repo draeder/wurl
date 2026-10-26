@@ -6,11 +6,13 @@ import { parseArgs } from 'node:util';
 import { containWeriftErrors, installWebRTC, weriftErrors } from '../src/webrtc.js';
 import { resolveTarget } from '../src/target.js';
 import { startPeer } from '../src/peer.js';
+import { costDelta, formatCost, readCost } from '../src/cost.js';
 
 function isLocalRelay(url) {
   try {
     const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
-    return host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === '::1'
+    // .test is reserved (RFC 2606): never a public relay, so test hostnames count as local.
+    return host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.test') || host === '::1'
       || host === 'host.docker.internal' || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
       || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
   } catch {
@@ -32,7 +34,12 @@ const HELP = `usage: wurl [options] <url>
 options:
   -n, --network <name>   network to join (overrides the URL)
   -r, --room <id>        room to join (overrides the URL)
-      --signal <url>     relay to use instead of the one the URL implies
+      --signal <url>     relay to use instead of the one the URL implies; a comma-separated
+                         list spreads the peers over several relays (peer i uses the i-th, round robin)
+      --cost <urls>      comma-separated Node relays (freertc scripts/node-relay.mjs) to read
+                         /debug/cost from before and after the run: the Worker requests,
+                         Durable Object requests and messages, and D1 queries the run cost them,
+                         as Cloudflare would bill the same relay code
   -p, --peers <n>        run n peers in this process (default 1, or 10 with --messages); they also
                          connect to each other.
                          More than ${PUBLIC_PEER_LIMIT} against a public relay needs --public-load
@@ -86,6 +93,7 @@ try {
       silent: { type: 'boolean', short: 's', default: false },
       json: { type: 'boolean', default: false },
       'public-load': { type: 'boolean', default: false },
+      cost: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -115,7 +123,7 @@ const CONNECT = Math.max(1, Number.parseInt(opt.connect, 10) || 4);
 const TIME_S = Math.max(1, Number(opt.time) || 20);
 const quiet = opt.silent || opt.json;
 
-if (PEERS > PUBLIC_PEER_LIMIT && !isLocalRelay(target.signalUrl) && !opt['public-load']) {
+if (PEERS > PUBLIC_PEER_LIMIT && !target.signalUrls.every(isLocalRelay) && !opt['public-load']) {
   console.error(`wurl: ${PEERS} peers against the public relay ${target.signalUrl} would count against its daily request limit.`);
   console.error(`  Run them against a local relay instead:  --signal ws://127.0.0.1:8788/ws`);
   console.error(`  (start one with: node scripts/node-relay.mjs in freertc), or add --public-load to do it anyway.`);
@@ -129,10 +137,22 @@ const say = (line) => { if (!quiet) process.stderr.write(`${line}\n`); };
 await installWebRTC();
 containWeriftErrors();
 
+const COST_URLS = opt.cost ? opt.cost.split(',').map((url) => url.trim()).filter(Boolean) : [];
+const costBefore = COST_URLS.length ? await readCost(COST_URLS) : null;
+async function reportCost({ peers, links, json }) {
+  if (!costBefore) return null;
+  // Let in-flight federation work (provider publishes, queued forwards) land first.
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const rows = costDelta(costBefore, await readCost(COST_URLS));
+  if (json) console.log(JSON.stringify({ cost: rows, peers, links }, null, 2));
+  else for (const line of formatCost(rows, { peers, links })) console.log(line);
+  return rows;
+}
+
 if (opt.messages) {
   const { runMessageTest } = await import('../src/messages.js');
   const tp = target.topology;
-  say(`* wurl --messages: ${PEERS} PeerPigeon peers on ${target.signalUrl}, network ${target.network}, room ${target.room}`);
+  say(`* wurl --messages: ${PEERS} PeerPigeon peers on ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}`);
   say(`* topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
   const result = await runMessageTest({
     target,
@@ -183,12 +203,13 @@ if (opt.messages) {
     if (weriftErrors.count) console.log(`werift     ${weriftErrors.count} internal error(s) contained, e.g. ${weriftErrors.last}`);
     console.log(`result     ${ok ? 'OK' : 'FAILED'} (${result.seconds.toFixed(1)}s)`);
   }
+  await reportCost({ peers: n, links: Math.round(mesh.own.reduce((a, b) => a + b, 0) / 2), json: opt.json });
   setTimeout(() => process.exit(ok ? 0 : 1), 300).unref();
   process.exitCode = ok ? 0 : 1;
 } else {
 
 say(`* wurl ${target.site}`);
-say(`* relay ${target.signalUrl}, network ${target.network}, room ${target.room}${many ? `, ${PEERS} peers` : ''}`);
+say(`* relay ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}${many ? `, ${PEERS} peers` : ''}`);
 
 const peers = [];
 let lastChange = performance.now();
@@ -217,7 +238,7 @@ const onEvent = (event) => {
 };
 
 for (let i = 0; i < PEERS; i += 1) {
-  peers.push(startPeer({ target, maxConnect: CONNECT, payload: opt.data ?? null, verbose: opt.verbose, onEvent }));
+  peers.push(startPeer({ target: { ...target, signalUrl: target.signalUrls[i % target.signalUrls.length] }, maxConnect: CONNECT, payload: opt.data ?? null, verbose: opt.verbose, onEvent }));
 }
 
 const started = performance.now();
@@ -316,7 +337,7 @@ if (opt.json) {
   groups.sort((a, b) => b - a);
   const failures = results.reduce((sum, r) => sum + r.failed.length, 0);
   console.log('');
-  console.log(`relay      ${target.signalUrl}: ${relayCount}/${PEERS} connected, ${registeredCount}/${PEERS} registered in ${target.network} / ${target.room}`);
+  console.log(`relay      ${target.signalUrls.join(', ')}: ${relayCount}/${PEERS} connected, ${registeredCount}/${PEERS} registered in ${target.network} / ${target.room}`);
   console.log(`links      per peer min ${Math.min(...links)}, avg ${(links.reduce((a, b) => a + b, 0) / PEERS).toFixed(1)}, max ${Math.max(...links)}; ${connectedCount}/${PEERS} peers have at least one`);
   console.log(`mesh       ${groups.length === 1 ? `one group of all ${PEERS} wurl peers` : `${groups.length} groups: ${groups.join(', ')}`}`);
   console.log(`timing     data channel open median ${median(opens) === null ? '-' : t(median(opens))}, rtt median ${median(rtts) === null ? '-' : `${Math.round(median(rtts))} ms`}`);
@@ -325,6 +346,10 @@ if (opt.json) {
 }
 
 for (const p of peers) p.stop();
+{
+  const pairs = new Set(results.flatMap((r) => r.connected.map((c) => [r.id, c.peer].sort().join(':'))));
+  await reportCost({ peers: PEERS, links: pairs.size, json: opt.json });
+}
 setTimeout(() => process.exit(exit), 300).unref();
 process.exitCode = exit;
 }

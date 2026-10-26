@@ -6,7 +6,7 @@ test('a site URL names its relay, network and room', () => {
   const { topology: _topology, ...target } = resolveTarget('https://decentralize.ooo/?network=network%3Atest&room=room-1');
   assert.deepEqual(
     target,
-    { site: 'https://decentralize.ooo/?network=network%3Atest&room=room-1', signalUrl: 'wss://decentralize.ooo/ws', network: 'network:test', room: 'room-1' },
+    { site: 'https://decentralize.ooo/?network=network%3Atest&room=room-1', signalUrl: 'wss://decentralize.ooo/ws', signalUrls: ['wss://decentralize.ooo/ws'], network: 'network:test', room: 'room-1' },
   );
   const page = resolveTarget('https://peer.ooo/?networkName=n1&sessionId=s1');
   assert.equal(page.network, 'n1');
@@ -35,4 +35,10 @@ test('the topology comes from the URL the way PeerPigeon\'s page reads it', () =
   assert.deepEqual(topo('https://x/?topology=dense-mesh&maxPeers=6'), { name: 'custom', minPeers: 2, maxPeers: 6, tolerantPeers: 1, source: 'URL' });
   assert.deepEqual(topo('https://x/?minPeers=9&maxPeers=4&tolerant=3'), { name: 'custom', minPeers: 4, maxPeers: 4, tolerantPeers: 3, source: 'URL' });
   assert.equal(topo('https://x/?topology=partial-mesh', { maxPeers: '7' }).maxPeers, 7);
+});
+
+test('--signal a,b spreads peers over several relays', () => {
+  const t = resolveTarget('https://decentralize.ooo/?room=r', { signal: 'ws://cloud1.test:1/ws, ws://127.0.0.1:2/ws' });
+  assert.equal(t.signalUrl, 'ws://cloud1.test:1/ws');
+  assert.deepEqual(t.signalUrls, ['ws://cloud1.test:1/ws', 'ws://127.0.0.1:2/ws']);
 });
