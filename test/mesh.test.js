@@ -67,6 +67,16 @@ it('an unreachable relay exits 6', async () => {
   assert.equal((await wurl(['-s', '-t', '3', 'http://127.0.0.1:9/?room=nobody'])).code, 6);
 });
 
+it('--messages: PeerPigeon peers form a mesh and every broadcast and direct message arrives', async (t) => {
+  const port = await startRelay(t);
+  const { code, stdout } = await wurl(['--messages', '--json', '-p', '5', '-t', '40', `http://127.0.0.1:${port}/?room=msg-${Date.now()}`]);
+  const report = JSON.parse(stdout);
+  assert.equal(code, 0, stdout);
+  assert.equal(report.mesh.groups.length, 1);
+  assert.equal(report.broadcast.delivered, report.broadcast.expected);
+  assert.equal(report.direct.delivered, report.direct.expected);
+});
+
 it('ten wurl peers in one process form one mesh', async (t) => {
   const port = await startRelay(t);
   const { code, stdout } = await wurl(['--json', '-p', '10', '-t', '30', `http://127.0.0.1:${port}/?room=ten-${Date.now()}`]);

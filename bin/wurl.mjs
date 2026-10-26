@@ -33,7 +33,8 @@ options:
   -n, --network <name>   network to join (overrides the URL)
   -r, --room <id>        room to join (overrides the URL)
       --signal <url>     relay to use instead of the one the URL implies
-  -p, --peers <n>        run n peers in this process (default 1); they also connect to each other.
+  -p, --peers <n>        run n peers in this process (default 1, or 10 with --messages); they also
+                         connect to each other.
                          More than ${PUBLIC_PEER_LIMIT} against a public relay needs --public-load
       --public-load      allow more than ${PUBLIC_PEER_LIMIT} peers against a public relay (each peer's
                          signaling counts against that relay's daily request limit)
@@ -43,10 +44,18 @@ options:
   -d, --data <text>      send this on each data channel when it opens
   -v, --verbose          also show freertc's own signaling and WebRTC log
   -s, --silent           only the summary
+  -m, --messages         PeerPigeon test: the peers form a PeerPigeon partial mesh, then every
+                         peer broadcasts once and sends one direct message to a peer it is
+                         usually not linked to; reports delivery and latency
+      --min-links <n>    with --messages: links each peer wants, at least (default 2)
+      --max-links <n>    with --messages: links each peer keeps, at most (default 10)
+      --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
+      --settle <s>       with --messages: how long the mesh must hold steady before sending (default 3)
       --json             the summary as JSON
   -h, --help
 
-exit status: 0 every peer registered and connected to at least one other peer;
+exit status: 0 every peer registered and connected to at least one other peer
+  (with --messages: one mesh, and every broadcast and direct message arrived; else 1);
   6 the relay couldn't be reached; 7 signaling failed before registering;
   52 registered, but nobody else is in the room; 28 peers were found but none connected.
 `;
@@ -59,7 +68,12 @@ try {
       network: { type: 'string', short: 'n' },
       room: { type: 'string', short: 'r' },
       signal: { type: 'string' },
-      peers: { type: 'string', short: 'p', default: '1' },
+      peers: { type: 'string', short: 'p' },
+      messages: { type: 'boolean', short: 'm', default: false },
+      'min-links': { type: 'string', default: '2' },
+      'max-links': { type: 'string', default: '10' },
+      wait: { type: 'string', default: '20' },
+      settle: { type: 'string', default: '3' },
       connect: { type: 'string', short: 'c', default: '4' },
       time: { type: 'string', short: 't', default: '20' },
       data: { type: 'string', short: 'd' },
@@ -88,7 +102,7 @@ try {
   process.exit(2);
 }
 
-const PEERS = Math.max(1, Number.parseInt(opt.peers, 10) || 1);
+const PEERS = Math.max(opt.messages ? 2 : 1, Number.parseInt(opt.peers ?? '', 10) || (opt.messages ? 10 : 1));
 const CONNECT = Math.max(1, Number.parseInt(opt.connect, 10) || 4);
 const TIME_S = Math.max(1, Number(opt.time) || 20);
 const quiet = opt.silent || opt.json;
@@ -96,7 +110,7 @@ const quiet = opt.silent || opt.json;
 if (PEERS > PUBLIC_PEER_LIMIT && !isLocalRelay(target.signalUrl) && !opt['public-load']) {
   console.error(`wurl: ${PEERS} peers against the public relay ${target.signalUrl} would count against its daily request limit.`);
   console.error(`  Run them against a local relay instead:  --signal ws://127.0.0.1:8788/ws`);
-  console.error(`  (start one with no federation, so nothing reaches public relays: FREERTC_FEDERATION=off node scripts/node-relay.mjs in freertc), or add --public-load to do it anyway.`);
+  console.error(`  (start one with: node scripts/node-relay.mjs in freertc), or add --public-load to do it anyway.`);
   process.exit(2);
 }
 const many = PEERS > 1;
@@ -105,6 +119,58 @@ const t = (seconds) => `${seconds.toFixed(2)}s`;
 const say = (line) => { if (!quiet) process.stderr.write(`${line}\n`); };
 
 await installWebRTC();
+
+if (opt.messages) {
+  const { runMessageTest } = await import('../src/messages.js');
+  say(`* wurl --messages: ${PEERS} PeerPigeon peers on ${target.signalUrl}, network ${target.network}, room ${target.room}`);
+  const result = await runMessageTest({
+    target,
+    peers: PEERS,
+    minLinks: Math.max(1, Number(opt['min-links']) || 2),
+    maxLinks: Math.max(1, Number(opt['max-links']) || 10),
+    timeS: TIME_S,
+    waitS: Math.max(1, Number(opt.wait) || 20),
+    settleS: Math.max(0, Number(opt.settle ?? 3)),
+    onProgress: (line) => say(`* ${line}`),
+  });
+  const ms = (list) => {
+    if (!list.length) return '-';
+    const sorted = [...list].sort((a, b) => a - b);
+    const at = (q) => Math.round(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]);
+    return `median ${at(0.5)} ms, p95 ${at(0.95)} ms, max ${Math.round(sorted[sorted.length - 1])} ms`;
+  };
+  const { mesh, broadcast, direct, ids } = result;
+  const n = ids.length;
+  const meshOk = mesh.groups.length === 1 && mesh.groups[0] === n;
+  const fullB = broadcast.filter((m) => m.arrived.length === m.to.size).length;
+  const deliveredB = broadcast.reduce((sum, m) => sum + m.arrived.length, 0);
+  const totalB = broadcast.reduce((sum, m) => sum + m.to.size, 0);
+  const deliveredD = direct.filter((m) => m.arrived.length === 1);
+  const routedD = direct.filter((m) => !m.neighbour).length;
+  const ok = meshOk && fullB === n && deliveredD.length === n;
+  if (opt.json) {
+    console.log(JSON.stringify({
+      relay: target.signalUrl, network: target.network, room: target.room, peers: n, ok,
+      mesh,
+      broadcast: { senders_complete: fullB, delivered: deliveredB, expected: totalB, latencies_ms: broadcast.flatMap((m) => m.latencies.map(Math.round)) },
+      direct: { delivered: deliveredD.length, expected: n, routed: routedD, failed: direct.filter((m) => m.arrived.length === 0).map((m) => ({ from: ids[m.from], to: ids[m.toIndex], sent: m.sent })) },
+    }, null, 2));
+  } else {
+    const short = (i) => (ids[i] || '?').slice(0, 8);
+    const links = mesh.degrees.length ? mesh.degrees : [0];
+    console.log('');
+    console.log(`mesh       ${n} peers: ${meshOk ? 'one group' : `${mesh.groups.length} groups (${mesh.groups.join(', ')})`}${mesh.formedAt === null ? ', never fully formed' : `, formed in ${mesh.formedAt.toFixed(1)}s`}; links per peer min ${Math.min(...links)}, avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)}, max ${Math.max(...links)}`);
+    console.log(`broadcast  ${fullB}/${n} reached all ${n - 1} others; ${deliveredB}/${totalB} deliveries (${totalB ? ((deliveredB / totalB) * 100).toFixed(1) : 0}%); ${ms(broadcast.flatMap((m) => m.latencies))}`);
+    const missed = ids.map((_, i) => ({ i, missed: broadcast.filter((m) => m.to.has(i) && !m.arrived.includes(i)).length })).filter((r) => r.missed).sort((a, b) => b.missed - a.missed);
+    if (missed.length) console.log(`           missed broadcasts: ${missed.slice(0, 10).map((r) => `${short(r.i)} ${r.missed}`).join(', ')}${missed.length > 10 ? ` (+${missed.length - 10} more)` : ''}`);
+    console.log(`direct     ${deliveredD.length}/${n} delivered (${routedD} routed through the mesh, ${n - routedD} to a neighbour); ${ms(direct.flatMap((m) => m.latencies))}`);
+    for (const m of direct.filter((d) => d.arrived.length === 0).slice(0, 10)) console.log(`           ${short(m.from)} -> ${short(m.toIndex)} not delivered${m.sent ? '' : ' (send refused)'}`);
+    console.log(`result     ${ok ? 'OK' : 'FAILED'} (${result.seconds.toFixed(1)}s)`);
+  }
+  setTimeout(() => process.exit(ok ? 0 : 1), 300).unref();
+  process.exitCode = ok ? 0 : 1;
+} else {
+
 say(`* wurl ${target.site}`);
 say(`* relay ${target.signalUrl}, network ${target.network}, room ${target.room}${many ? `, ${PEERS} peers` : ''}`);
 
@@ -244,3 +310,4 @@ if (opt.json) {
 for (const p of peers) p.stop();
 setTimeout(() => process.exit(exit), 300).unref();
 process.exitCode = exit;
+}

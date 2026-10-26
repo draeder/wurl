@@ -79,9 +79,8 @@ were found but none connected.
 
 Run big tests against a local relay: every peer's signaling counts against a
 public relay's daily request limit, and a 50-peer test once used up the free
-plan's 100,000 requests in an hour. Start a relay with federation off, so the
-test's lookups don't reach public relays either (`FREERTC_FEDERATION=off node
-scripts/node-relay.mjs` in freertc), then:
+plan's 100,000 requests in an hour. Start a relay (`node scripts/node-relay.mjs`
+in freertc), then:
 
 ```
 wurl -p 50 -t 60 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=room-vsmtj78m"
@@ -93,6 +92,35 @@ This runs 50 peers in one process. Locally, 20 wurl peers formed one mesh using
 169 MB in total, about 8 MB a peer. The summary reports links per peer, whether
 the wurl peers form one group, and the median data-channel open time and
 round trip.
+
+## Broadcast and direct messages (`--messages`)
+
+```
+wurl --messages -p 50 -t 120 --settle 15 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=wurl-50"
+```
+
+`-m, --messages` runs the peers as PeerPigeon nodes, using PeerPigeon's own code
+bundled in `src/vendor/` (refresh it from `../PeerPigeon` with `npm run vendor:peerpigeon`).
+It waits for one partial mesh to hold steady for `--settle` seconds, then:
+
+- every peer broadcasts once, and gossip should carry each broadcast to every other peer;
+- every peer sends one direct message to the peer halfway round, usually several
+  hops away, so the mesh has to route it.
+
+The report gives the mesh shape (groups, links per peer), the broadcast and
+direct delivery counts with latency (median, p95, max), and names every peer
+and message that missed. The exit status is 0 only when there is one mesh and
+everything arrived.
+
+Messages sent before the mesh has settled get lost more often: on a local relay
+30 peers delivered 16/30 direct messages with a 3 s settle, and 28/30 with 15 s.
+
+| Option | |
+| --- | --- |
+| `--min-links <n>` | links each peer wants, at least (default 2) |
+| `--max-links <n>` | links each peer keeps, at most (default 10) |
+| `--settle <s>` | how long the mesh must hold steady before sending (default 3) |
+| `--wait <s>` | how long to wait for messages to arrive (default 20) |
 
 ## Tests
 

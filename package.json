@@ -3,11 +3,19 @@
   "version": "0.1.0",
   "description": "curl for WebRTC: join a PSP site as a browserless peer and report every step",
   "type": "module",
-  "bin": { "wurl": "bin/wurl.mjs" },
-  "files": ["bin/", "src/"],
-  "engines": { "node": ">=20" },
+  "bin": {
+    "wurl": "bin/wurl.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "vendor:peerpigeon": "node -e \"const fs=require('fs');const {execSync}=require('child_process');const sha=execSync('git -C ../PeerPigeon rev-parse --short HEAD').toString().trim();fs.writeFileSync('src/vendor/peerpigeon.js','// PeerPigeon '+sha+' (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.\\\\n// Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).\\\\n'+fs.readFileSync('../PeerPigeon/dist/index.js','utf8'));fs.copyFileSync('../PeerPigeon/dist/index.d.ts','src/vendor/peerpigeon.d.ts');console.log('vendored PeerPigeon '+sha)\""
   },
   "dependencies": {
     "freertc": "github:draeder/freertc#d4db41fb8d5c0e42eec6dbb570a08617edbf51f7",
