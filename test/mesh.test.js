@@ -69,7 +69,7 @@ it('an unreachable relay exits 6', async () => {
 
 it('--messages: PeerPigeon peers form a mesh and every broadcast and direct message arrives', async (t) => {
   const port = await startRelay(t);
-  const { code, stdout } = await wurl(['--messages', '--json', '-p', '5', '-t', '40', `http://127.0.0.1:${port}/?room=msg-${Date.now()}`]);
+  const { code, stdout } = await wurl(['--messages', '--json', '-p', '5', '-t', '40', `http://127.0.0.1:${port}/?room=msg-${Date.now()}&topology=dense-mesh`]);
   const report = JSON.parse(stdout);
   assert.equal(code, 0, stdout);
   assert.equal(report.mesh.groups.length, 1);

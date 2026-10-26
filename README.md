@@ -96,7 +96,7 @@ round trip.
 ## Broadcast and direct messages (`--messages`)
 
 ```
-wurl --messages -p 50 -t 120 --settle 15 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=wurl-50"
+wurl --messages -p 50 -t 120 --settle 15 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=wurl-50&topology=partial-mesh"
 ```
 
 `-m, --messages` runs the peers as PeerPigeon nodes, using PeerPigeon's own code
@@ -112,13 +112,23 @@ direct delivery counts with latency (median, p95, max), and names every peer
 and message that missed. The exit status is 0 only when there is one mesh and
 everything arrived.
 
-Messages sent before the mesh has settled get lost more often: on a local relay
-30 peers delivered 16/30 direct messages with a 3 s settle, and 28/30 with 15 s.
+The topology comes from the URL, exactly as on PeerPigeon's example page:
+`?topology=token-ring|star|partial-mesh|dense-mesh` picks a preset (token-ring is
+the default: minPeers 1, maxPeers 2; partial-mesh is 2 / 5, dense-mesh 3 / 10, star
+1 / 20), and `?minPeers=`, `?maxPeers=` and `?tolerantPeers=` set them directly (then
+the preset doesn't apply, and the page's 2 / 5 / 1 is the starting point). The
+report shows the topology used, each peer's own link count against maxPeers, and
+the mesh counted by links either end lists, which differs when links are one-sided.
+
+On a local relay, 30 peers with `topology=partial-mesh` and a 15 s settle: every peer
+kept 4–5 links, broadcast 870/870, and direct 16/30, failing in both directions
+between the same pairs.
 
 | Option | |
 | --- | --- |
-| `--min-links <n>` | links each peer wants, at least (default 2) |
-| `--max-links <n>` | links each peer keeps, at most (default 10) |
+| `--min-links <n>` | override minPeers |
+| `--max-links <n>` | override maxPeers |
+| `--tolerant <n>` | override tolerantPeers |
 | `--settle <s>` | how long the mesh must hold steady before sending (default 3) |
 | `--wait <s>` | how long to wait for messages to arrive (default 20) |
 

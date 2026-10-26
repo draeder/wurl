@@ -29,3 +29,24 @@ export function installWebRTC() {
   })();
   return installing;
 }
+
+// werift sometimes throws from its own timers when a data channel closes
+// mid-flush (seen as "Cannot read properties of undefined (reading 'id')" in
+// RTCSctpTransport.dataChannelFlush), which would end the whole process. Errors
+// whose stack is inside werift are counted instead; anything else still crashes.
+export const weriftErrors = { count: 0, last: null };
+
+export function containWeriftErrors() {
+  const handle = (error) => {
+    const stack = String(error?.stack || '');
+    if (/[\\/]werift[\\/]/.test(stack)) {
+      weriftErrors.count += 1;
+      weriftErrors.last = String(error?.message || error);
+      return;
+    }
+    console.error(error);
+    process.exit(70);
+  };
+  process.on('uncaughtException', handle);
+  process.on('unhandledRejection', handle);
+}

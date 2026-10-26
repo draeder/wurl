@@ -3,7 +3,7 @@
 // peer and report every step: relay, registration, discovery, WebRTC
 // negotiation, data channel, round trips.
 import { parseArgs } from 'node:util';
-import { installWebRTC } from '../src/webrtc.js';
+import { containWeriftErrors, installWebRTC, weriftErrors } from '../src/webrtc.js';
 import { resolveTarget } from '../src/target.js';
 import { startPeer } from '../src/peer.js';
 
@@ -47,8 +47,12 @@ options:
   -m, --messages         PeerPigeon test: the peers form a PeerPigeon partial mesh, then every
                          peer broadcasts once and sends one direct message to a peer it is
                          usually not linked to; reports delivery and latency
-      --min-links <n>    with --messages: links each peer wants, at least (default 2)
-      --max-links <n>    with --messages: links each peer keeps, at most (default 10)
+                         The topology comes from the URL, as on PeerPigeon's page:
+                         ?topology=token-ring|star|partial-mesh|dense-mesh (default token-ring),
+                         or ?minPeers= ?maxPeers= ?tolerantPeers= directly
+      --min-links <n>    with --messages: override minPeers
+      --max-links <n>    with --messages: override maxPeers
+      --tolerant <n>     with --messages: override tolerantPeers
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
       --settle <s>       with --messages: how long the mesh must hold steady before sending (default 3)
       --json             the summary as JSON
@@ -70,8 +74,9 @@ try {
       signal: { type: 'string' },
       peers: { type: 'string', short: 'p' },
       messages: { type: 'boolean', short: 'm', default: false },
-      'min-links': { type: 'string', default: '2' },
-      'max-links': { type: 'string', default: '10' },
+      'min-links': { type: 'string' },
+      'max-links': { type: 'string' },
+      tolerant: { type: 'string' },
       wait: { type: 'string', default: '20' },
       settle: { type: 'string', default: '3' },
       connect: { type: 'string', short: 'c', default: '4' },
@@ -96,7 +101,10 @@ if (opt.help || positionals.length !== 1) {
 
 let target;
 try {
-  target = resolveTarget(positionals[0], { network: opt.network, room: opt.room, signal: opt.signal });
+  target = resolveTarget(positionals[0], {
+    network: opt.network, room: opt.room, signal: opt.signal,
+    minPeers: opt['min-links'], maxPeers: opt['max-links'], tolerantPeers: opt.tolerant,
+  });
 } catch (error) {
   console.error(`wurl: ${error.message}`);
   process.exit(2);
@@ -119,15 +127,16 @@ const t = (seconds) => `${seconds.toFixed(2)}s`;
 const say = (line) => { if (!quiet) process.stderr.write(`${line}\n`); };
 
 await installWebRTC();
+containWeriftErrors();
 
 if (opt.messages) {
   const { runMessageTest } = await import('../src/messages.js');
+  const tp = target.topology;
   say(`* wurl --messages: ${PEERS} PeerPigeon peers on ${target.signalUrl}, network ${target.network}, room ${target.room}`);
+  say(`* topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
   const result = await runMessageTest({
     target,
     peers: PEERS,
-    minLinks: Math.max(1, Number(opt['min-links']) || 2),
-    maxLinks: Math.max(1, Number(opt['max-links']) || 10),
     timeS: TIME_S,
     waitS: Math.max(1, Number(opt.wait) || 20),
     settleS: Math.max(0, Number(opt.settle ?? 3)),
@@ -147,10 +156,11 @@ if (opt.messages) {
   const totalB = broadcast.reduce((sum, m) => sum + m.to.size, 0);
   const deliveredD = direct.filter((m) => m.arrived.length === 1);
   const routedD = direct.filter((m) => !m.neighbour).length;
-  const ok = meshOk && fullB === n && deliveredD.length === n;
+  const overLimit = mesh.own.filter((c) => c > mesh.maxLinks + mesh.tolerantPeers).length;
+  const ok = meshOk && fullB === n && deliveredD.length === n && overLimit === 0;
   if (opt.json) {
     console.log(JSON.stringify({
-      relay: target.signalUrl, network: target.network, room: target.room, peers: n, ok,
+      relay: target.signalUrl, network: target.network, room: target.room, peers: n, ok, topology: target.topology,
       mesh,
       broadcast: { senders_complete: fullB, delivered: deliveredB, expected: totalB, latencies_ms: broadcast.flatMap((m) => m.latencies.map(Math.round)) },
       direct: { delivered: deliveredD.length, expected: n, routed: routedD, failed: direct.filter((m) => m.arrived.length === 0).map((m) => ({ from: ids[m.from], to: ids[m.toIndex], sent: m.sent })) },
@@ -159,12 +169,18 @@ if (opt.messages) {
     const short = (i) => (ids[i] || '?').slice(0, 8);
     const links = mesh.degrees.length ? mesh.degrees : [0];
     console.log('');
-    console.log(`mesh       ${n} peers: ${meshOk ? 'one group' : `${mesh.groups.length} groups (${mesh.groups.join(', ')})`}${mesh.formedAt === null ? ', never fully formed' : `, formed in ${mesh.formedAt.toFixed(1)}s`}; links per peer min ${Math.min(...links)}, avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)}, max ${Math.max(...links)}`);
+    const own = mesh.own.length ? mesh.own : [0];
+    const over = mesh.own.filter((c) => c > mesh.maxLinks).length;
+    const overTolerant = mesh.own.filter((c) => c > mesh.maxLinks + mesh.tolerantPeers).length;
+    console.log(`topology   ${target.topology.name}: minPeers ${mesh.minLinks}, maxPeers ${mesh.maxLinks}, tolerantPeers ${mesh.tolerantPeers} (from ${target.topology.source})`);
+    console.log(`links      each peer's own count min ${Math.min(...own)}, avg ${(own.reduce((a, b) => a + b, 0) / own.length).toFixed(1)}, max ${Math.max(...own)}; ${over ? `${over} over maxPeers${overTolerant ? `, ${overTolerant} over maxPeers + tolerantPeers` : ''}` : 'none over maxPeers'}`);
+    console.log(`mesh       ${n} peers: ${meshOk ? 'one group' : `${mesh.groups.length} groups (${mesh.groups.join(', ')})`}${mesh.formedAt === null ? ', never fully formed' : `, formed in ${mesh.formedAt.toFixed(1)}s`}; counting a link if either end lists it: min ${Math.min(...links)}, avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)}, max ${Math.max(...links)}`);
     console.log(`broadcast  ${fullB}/${n} reached all ${n - 1} others; ${deliveredB}/${totalB} deliveries (${totalB ? ((deliveredB / totalB) * 100).toFixed(1) : 0}%); ${ms(broadcast.flatMap((m) => m.latencies))}`);
     const missed = ids.map((_, i) => ({ i, missed: broadcast.filter((m) => m.to.has(i) && !m.arrived.includes(i)).length })).filter((r) => r.missed).sort((a, b) => b.missed - a.missed);
     if (missed.length) console.log(`           missed broadcasts: ${missed.slice(0, 10).map((r) => `${short(r.i)} ${r.missed}`).join(', ')}${missed.length > 10 ? ` (+${missed.length - 10} more)` : ''}`);
     console.log(`direct     ${deliveredD.length}/${n} delivered (${routedD} routed through the mesh, ${n - routedD} to a neighbour); ${ms(direct.flatMap((m) => m.latencies))}`);
     for (const m of direct.filter((d) => d.arrived.length === 0).slice(0, 10)) console.log(`           ${short(m.from)} -> ${short(m.toIndex)} not delivered${m.sent ? '' : ' (send refused)'}`);
+    if (weriftErrors.count) console.log(`werift     ${weriftErrors.count} internal error(s) contained, e.g. ${weriftErrors.last}`);
     console.log(`result     ${ok ? 'OK' : 'FAILED'} (${result.seconds.toFixed(1)}s)`);
   }
   setTimeout(() => process.exit(ok ? 0 : 1), 300).unref();
@@ -305,6 +321,7 @@ if (opt.json) {
   console.log(`mesh       ${groups.length === 1 ? `one group of all ${PEERS} wurl peers` : `${groups.length} groups: ${groups.join(', ')}`}`);
   console.log(`timing     data channel open median ${median(opens) === null ? '-' : t(median(opens))}, rtt median ${median(rtts) === null ? '-' : `${Math.round(median(rtts))} ms`}`);
   if (failures) console.log(`failures   ${failures}: ${[...new Set(results.flatMap((r) => r.failed.map((f) => f.reason)))].join('; ')}`);
+  if (weriftErrors.count) console.log(`werift     ${weriftErrors.count} internal error(s) contained, e.g. ${weriftErrors.last}`);
 }
 
 for (const p of peers) p.stop();

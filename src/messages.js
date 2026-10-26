@@ -41,7 +41,8 @@ function meshShape(ids, linksOf) {
  * Run the test. Returns { ids, mesh, broadcast, direct } for the report.
  * onProgress(line) gets one line per second while the mesh forms.
  */
-export async function runMessageTest({ target, peers: count, minLinks = 2, maxLinks = 10, timeS = 60, waitS = 20, settleS = 3, onProgress = () => {} }) {
+export async function runMessageTest({ target, peers: count, timeS = 60, waitS = 20, settleS = 3, onProgress = () => {} }) {
+  const { minPeers: minLinks, maxPeers: maxLinks, tolerantPeers } = target.topology;
   const started = performance.now();
   const elapsed = () => (performance.now() - started) / 1000;
   const nodes = [];
@@ -55,6 +56,7 @@ export async function runMessageTest({ target, peers: count, minLinks = 2, maxLi
       signalingServer: target.signalUrl,
       minPeers: minLinks,
       maxPeers: maxLinks,
+      tolerantPeers,
     });
     const inbox = new Map();
     const take = (data) => {
@@ -100,6 +102,9 @@ export async function runMessageTest({ target, peers: count, minLinks = 2, maxLi
     await sleep(250);
   }
   const ids = shape.ids;
+  // What each peer itself reports: a link counts once per end, so a peer over
+  // maxPeers here is over its own limit, not double-counted.
+  const own = nodes.map((node) => linksOf(node).length);
   const run = Date.now().toString(36);
 
   async function deliver(messages) {
@@ -137,7 +142,7 @@ export async function runMessageTest({ target, peers: count, minLinks = 2, maxLi
   await Promise.all(nodes.map((node) => node.destroy().catch(() => {})));
   return {
     ids,
-    mesh: { formedAt, groups: shape.groups, degrees: shape.degrees },
+    mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
     broadcast,
     direct,
     seconds: elapsed(),
