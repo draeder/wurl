@@ -14,7 +14,7 @@ function randomPeerId() {
  * step: status, registered, peers, dial, connected, failed, closed, data, rtt, log.
  * Returns { id, state, stop() }.
  */
-export function startPeer({ target, maxConnect = 4, payload = null, pingEveryMs = 2000, verbose = false, onEvent = () => {} }) {
+export function startPeer({ target, maxConnect = 4, payload = null, pingEveryMs = 500, verbose = false, onEvent = () => {} }) {
   const id = randomPeerId();
   const started = performance.now();
   const at = () => (performance.now() - started) / 1000;
@@ -105,6 +105,7 @@ export function startPeer({ target, maxConnect = 4, payload = null, pingEveryMs 
         const since = state.dialed.get(peerId);
         emit('connected', { to: peerId, took: since == null ? null : at() - since, incoming: since == null });
         if (payload != null) sendWhenReady(peerId, payload);
+        setTimeout(() => ping(peerId), 50);
       } else if (connection === 'failed') {
         state.failed.set(peerId, 'connection failed');
         emit('failed', { to: peerId, reason: 'connection failed' });
@@ -143,14 +144,17 @@ export function startPeer({ target, maxConnect = 4, payload = null, pingEveryMs 
   });
 
   // Round trips to every connected peer that answers wurl pings (other wurl
-  // peers do; browser pages generally don't).
+  // peers do; browser pages generally don't): one as each link opens, then
+  // on a timer.
   let n = 0;
+  const ping = (peerId) => {
+    if (!state.connected.has(peerId)) return;
+    n += 1;
+    pings.set(`${peerId}:${n}`, performance.now());
+    send(peerId, JSON.stringify({ t: PING, n }));
+  };
   const pinger = setInterval(() => {
-    for (const peerId of state.connected.keys()) {
-      n += 1;
-      pings.set(`${peerId}:${n}`, performance.now());
-      send(peerId, JSON.stringify({ t: PING, n }));
-    }
+    for (const peerId of state.connected.keys()) ping(peerId);
   }, pingEveryMs);
 
   return {

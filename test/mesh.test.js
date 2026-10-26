@@ -6,7 +6,7 @@ import { mkdtempSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -20,7 +20,11 @@ let nextPort = 19_000 + Math.floor(Math.random() * 400) * 2;
 async function startRelay(t) {
   const port = nextPort;
   nextPort += 1;
-  const relay = spawn(process.execPath, ['--no-warnings', RELAY], {
+  // Before Node 22.13 the relay needs this flag for node:sqlite; given here, it
+  // doesn't re-run itself in a child process.
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  const flags = major === 22 && minor < 13 ? ['--experimental-sqlite'] : [];
+  const relay = spawn(process.execPath, [...flags, '--no-warnings', RELAY], {
     env: { ...process.env, PORT: String(port), FREERTC_FEDERATION: 'off', FREERTC_DATA_DIR: mkdtempSync(path.join(tmpdir(), 'wurl-relay-')) },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -40,9 +44,11 @@ async function startRelay(t) {
 const wurl = (args) => promisify(execFile)(process.execPath, [WURL, ...args], { timeout: 60_000 })
   .then(({ stdout }) => ({ code: 0, stdout }), (error) => ({ code: error.code, stdout: error.stdout }));
 
-test('three wurl peers form one mesh and answer each other\'s pings', async (t) => {
+// P2P is parallel: each test has its own relay and port, so they all run at once.
+describe('wurl against a local freertc relay', { concurrency: true }, () => {
+it('three wurl peers form one mesh and answer each other\'s pings', async (t) => {
   const port = await startRelay(t);
-  const { code, stdout } = await wurl(['--json', '-p', '3', '-t', '8', `http://127.0.0.1:${port}/?network=network:test&room=mesh-${Date.now()}`]);
+  const { code, stdout } = await wurl(['--json', '-p', '3', '-t', '20', `http://127.0.0.1:${port}/?network=network:test&room=mesh-${Date.now()}`]);
   const report = JSON.parse(stdout);
   assert.equal(code, 0, stdout);
   for (const peer of report.peers) {
@@ -52,8 +58,20 @@ test('three wurl peers form one mesh and answer each other\'s pings', async (t) 
   }
 });
 
-test('an empty room exits 52 and an unreachable relay exits 6', async (t) => {
+it('an empty room exits 52', async (t) => {
   const port = await startRelay(t);
   assert.equal((await wurl(['-s', '-t', '10', `http://127.0.0.1:${port}/?room=empty-${Date.now()}`])).code, 52);
+});
+
+it('an unreachable relay exits 6', async () => {
   assert.equal((await wurl(['-s', '-t', '3', 'http://127.0.0.1:9/?room=nobody'])).code, 6);
+});
+
+it('ten wurl peers in one process form one mesh', async (t) => {
+  const port = await startRelay(t);
+  const { code, stdout } = await wurl(['--json', '-p', '10', '-t', '30', `http://127.0.0.1:${port}/?room=ten-${Date.now()}`]);
+  assert.equal(code, 0, stdout);
+  const report = JSON.parse(stdout);
+  assert.ok(report.peers.every((peer) => peer.connected.length >= 1));
+});
 });

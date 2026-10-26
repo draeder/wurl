@@ -19,8 +19,8 @@ options:
       --signal <url>     relay to use instead of the one the URL implies
   -p, --peers <n>        run n peers in this process (default 1); they also connect to each other
   -c, --connect <n>      connections each peer dials, at most (default 4)
-  -t, --time <s>         longest run, in seconds (default 20); a single peer stops sooner
-                         once every peer it found has connected or failed
+  -t, --time <s>         longest run, in seconds (default 20); wurl stops sooner once
+                         every peer has settled (connected or failed, round trips measured)
   -d, --data <text>      send this on each data channel when it opens
   -v, --verbose          also show freertc's own signaling and WebRTC log
   -s, --silent           only the summary
@@ -122,27 +122,34 @@ if (many && !quiet && !opt.verbose) {
   }, 2000);
 }
 
-// When to stop: at --time, or (one peer) once everything it found has settled.
+// When to stop: at --time, or as soon as every peer has settled: registered,
+// every peer it dialed connected or failed, a round trip measured over each
+// link that answers pings, and nothing new for QUIET_S. A room with nobody
+// else in it settles QUIET_S after registering.
+const QUIET_S = 2;
+const settled = ({ state }) => {
+  if (state.registeredAt === null) return false;
+  if (state.seen.size === 0) return elapsed() - state.registeredAt >= QUIET_S;
+  const dialedDone = [...state.dialed.keys()].every((peerId) => state.connected.has(peerId) || state.failed.has(peerId));
+  if (!dialedDone || state.connected.size + state.failed.size === 0) return false;
+  // Other wurl peers answer pings; browsers usually don't, so a link to one only
+  // has to have been open a moment.
+  const localLinks = [...state.connected.keys()].filter((peerId) => localIds.has(peerId));
+  return localLinks.every((peerId) => state.rtt.has(peerId));
+};
+const localIds = new Set(peers.map((p) => p.id));
 await new Promise((resolve) => {
   const check = setInterval(() => {
-    const s = elapsed();
-    if (s >= TIME_S) { clearInterval(check); resolve(); return; }
-    if (many) return;
-    const { state } = peers[0];
     const quietFor = (performance.now() - lastChange) / 1000;
-    if (state.registeredAt === null) return;
-    if (state.seen.size === 0 && s - state.registeredAt >= 6) { clearInterval(check); resolve(); return; }
-    const dialedSettled = [...state.dialed.keys()].every((peerId) => state.connected.has(peerId) || state.failed.has(peerId));
-    if (state.seen.size > 0 && dialedSettled && state.connected.size + state.failed.size > 0 && quietFor >= 3 && (state.connected.size === 0 || state.rtt.size > 0 || quietFor >= 5)) {
+    if (elapsed() >= TIME_S || (quietFor >= QUIET_S && peers.every(settled))) {
       clearInterval(check);
       resolve();
     }
-  }, 250);
+  }, 100);
 });
 clearInterval(progress);
 
 // Summary.
-const localIds = new Set(peers.map((p) => p.id));
 const results = peers.map((p) => ({
   id: p.id,
   relay_connected_s: p.state.signalingAt,

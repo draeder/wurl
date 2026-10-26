@@ -10,7 +10,7 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "freertc": "github:draeder/freertc#147d1292bed289030c7769ecb8e35943384ea292",
+    "freertc": "github:draeder/freertc#d4db41fb8d5c0e42eec6dbb570a08617edbf51f7",
     "werift": "0.24.4",
     "ws": "^8.18.0"
   },
