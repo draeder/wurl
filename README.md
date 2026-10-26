@@ -68,6 +68,7 @@ or a relay URL (`wss://host/ws`). The network and room come from `?network=` and
 | `-v, --verbose` | also show freertc's own signaling and WebRTC log |
 | `-s, --silent` | only the summary |
 | `--json` | the summary as JSON |
+| `--public-load` | allow more than 5 peers against a public relay |
 
 Exit status, curl-style: `0` every peer registered and connected to at least
 one other; `6` the relay couldn't be reached; `7` signaling failed before
@@ -76,9 +77,17 @@ were found but none connected.
 
 ## A mesh test without a browser
 
+Run big tests against a local relay: every peer's signaling counts against a
+public relay's daily request limit, and a 50-peer test once used up the free
+plan's 100,000 requests in an hour. Start a relay with federation off, so the
+test's lookups don't reach public relays either (`FREERTC_FEDERATION=off node
+scripts/node-relay.mjs` in freertc), then:
+
 ```
-wurl -p 50 -t 60 "https://decentralize.ooo/?network=network:test&room=room-vsmtj78m"
+wurl -p 50 -t 60 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=room-vsmtj78m"
 ```
+
+wurl refuses more than 5 peers against a public relay unless you add `--public-load`.
 
 This runs 50 peers in one process. Locally, 20 wurl peers formed one mesh using
 169 MB in total, about 8 MB a peer. The summary reports links per peer, whether

@@ -7,6 +7,22 @@ import { installWebRTC } from '../src/webrtc.js';
 import { resolveTarget } from '../src/target.js';
 import { startPeer } from '../src/peer.js';
 
+function isLocalRelay(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === '::1'
+      || host === 'host.docker.internal' || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
+      || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+  } catch {
+    return false;
+  }
+}
+
+// Many peers against a public relay can use up its whole daily request limit
+// (a 50-peer test spent the free plan's 100,000 in an hour). Up to this many
+// is a test; more needs --public-load, or a local relay via --signal.
+const PUBLIC_PEER_LIMIT = 5;
+
 const HELP = `usage: wurl [options] <url>
 
   <url>  a PSP site, e.g. "https://decentralize.ooo/?network=network:test&room=room-1",
@@ -17,7 +33,10 @@ options:
   -n, --network <name>   network to join (overrides the URL)
   -r, --room <id>        room to join (overrides the URL)
       --signal <url>     relay to use instead of the one the URL implies
-  -p, --peers <n>        run n peers in this process (default 1); they also connect to each other
+  -p, --peers <n>        run n peers in this process (default 1); they also connect to each other.
+                         More than ${PUBLIC_PEER_LIMIT} against a public relay needs --public-load
+      --public-load      allow more than ${PUBLIC_PEER_LIMIT} peers against a public relay (each peer's
+                         signaling counts against that relay's daily request limit)
   -c, --connect <n>      connections each peer dials, at most (default 4)
   -t, --time <s>         longest run, in seconds (default 20); wurl stops sooner once
                          every peer has settled (connected or failed, round trips measured)
@@ -47,6 +66,7 @@ try {
       verbose: { type: 'boolean', short: 'v', default: false },
       silent: { type: 'boolean', short: 's', default: false },
       json: { type: 'boolean', default: false },
+      'public-load': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -72,6 +92,13 @@ const PEERS = Math.max(1, Number.parseInt(opt.peers, 10) || 1);
 const CONNECT = Math.max(1, Number.parseInt(opt.connect, 10) || 4);
 const TIME_S = Math.max(1, Number(opt.time) || 20);
 const quiet = opt.silent || opt.json;
+
+if (PEERS > PUBLIC_PEER_LIMIT && !isLocalRelay(target.signalUrl) && !opt['public-load']) {
+  console.error(`wurl: ${PEERS} peers against the public relay ${target.signalUrl} would count against its daily request limit.`);
+  console.error(`  Run them against a local relay instead:  --signal ws://127.0.0.1:8788/ws`);
+  console.error(`  (start one with no federation, so nothing reaches public relays: FREERTC_FEDERATION=off node scripts/node-relay.mjs in freertc), or add --public-load to do it anyway.`);
+  process.exit(2);
+}
 const many = PEERS > 1;
 const short = (peerId) => String(peerId || '').slice(0, 8) || '?';
 const t = (seconds) => `${seconds.toFixed(2)}s`;
