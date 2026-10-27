@@ -108,14 +108,13 @@ Every peer:
   so the mesh has to route it.
 
 The test is asynchronous, as P2P is. Each peer joins at its own random time
-within `--join-window` seconds (default 20). Once it has a link, it sends its
-broadcast and then its direct message at its own random times, each up to
-`--send-spread` seconds (default 10) after the last. Nothing waits for the mesh,
-so messages go out while other peers are still joining and links are still forming.
-Each latency is measured from that message's own send time. The report also says
-how many messages went out before the mesh had formed, and how many broadcasts
-reached peers that joined after they were sent (only anti-entropy repair can
-deliver those).
+within `--join-window` seconds (default 20). No one sends anything until every
+peer has joined, so every broadcast has all its recipients in the room. Then
+each peer sends its broadcast and its direct message at its own random times,
+each up to `--send-spread` seconds (default 10) after the last, while links are
+still settling. Each latency is measured from that message's own send time, and
+the report says when the last peer joined and how many messages went out before
+the mesh had fully formed.
 
 `--phased` runs the old lockstep test instead: everyone joins at once, one mesh
 must hold steady for `--settle` seconds, then all broadcasts go out, then all

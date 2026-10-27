@@ -226,13 +226,17 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     }
   })();
 
+  let allJoinedAt = null;
   const lifecycle = async (i) => {
     const node = nodes[i];
     await sleep(jitter(joinWindowS * 1000));
     await node.start();
     joinedAt[i] = performance.now();
     ids[i] = String(node.mesh.getClientId() || '');
-    // A peer talks once it has someone to talk to, not when the network is done.
+    // No one sends until every peer has joined, so every broadcast has all
+    // its recipients in the room; after that each peer sends on its own time.
+    while (joinedAt.some((at) => at === null) && performance.now() < deadline) await sleep(100);
+    if (allJoinedAt === null) allJoinedAt = (performance.now() - started) / 1000;
     while (linksOf(node).length === 0 && performance.now() < deadline) await sleep(100);
     await sleep(jitter(sendSpreadS * 1000));
     const bToken = `b:${run}:${i}`;
@@ -273,6 +277,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     mode: 'async',
     joinWindowS,
     sendSpreadS,
+    allJoinedAt,
     mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
     broadcast: broadcasts.sort((a, b) => a.from - b.from).map(settle),
     direct: directs.sort((a, b) => a.from - b.from).map(settle),
