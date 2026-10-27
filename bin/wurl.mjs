@@ -250,7 +250,14 @@ if (opt.messages) {
     const missed = ids.map((_, i) => ({ i, missed: broadcast.filter((m) => m.to.has(i) && !m.arrived.includes(i)).length })).filter((r) => r.missed).sort((a, b) => b.missed - a.missed);
     if (missed.length) console.log(`           missed broadcasts: ${missed.slice(0, 10).map((r) => `${short(r.i)} ${r.missed}`).join(', ')}${missed.length > 10 ? ` (+${missed.length - 10} more)` : ''}`);
     console.log(`direct     ${deliveredD.length}/${n} delivered (${routedD} routed through the mesh, ${n - routedD} to a neighbour); ${ms(direct.flatMap((m) => m.latencies))}`);
-    for (const m of direct.filter((d) => d.arrived.length === 0).slice(0, 10)) console.log(`           ${short(m.from)} -> ${short(m.toIndex)} not delivered${m.sent ? '' : ' (send refused)'}`);
+    for (const m of direct.filter((d) => d.arrived.length === 0).slice(0, 10)) {
+      console.log(`           ${short(m.from)} -> ${short(m.toIndex)} not delivered${m.sent ? '' : ' (send refused)'}${m.neighbour ? ' (the target was a neighbour)' : ''}`);
+      for (const hop of m.trace ?? []) {
+        const name = (x) => (typeof x === 'number' ? short(x) : String(x).slice(0, 8));
+        console.log(`             ${name(hop.from)} -> ${name(hop.to)}: ${hop.sent ? (hop.arrived ? 'arrived' : 'sent, never arrived') : `refused (${hop.error})`}; link ${hop.link} when sent`);
+      }
+      if (m.trace && m.trace.length === 0) console.log('             no frame for it left any peer');
+    }
     { const errors = result.werift ?? weriftErrors; if (errors.count) console.log(`werift     ${errors.count} internal error(s) contained, e.g. ${errors.last}`); }
     console.log(`result     ${ok ? 'OK' : 'FAILED'} (${result.seconds.toFixed(1)}s)`);
   }

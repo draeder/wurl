@@ -36,6 +36,33 @@ const take = (data, via) => {
 };
 node.gossip.on('messageReceived', ({ message, local }) => { if (!local) take(message?.data, 'broadcast'); });
 node.gossip.on('directMessageReceived', ({ message }) => take(message?.data, 'direct'));
+// Trace every hop of a test direct message: each frame as it leaves this
+// peer (to whom) and as it arrives (from whom), so a lost one shows where it died.
+const tokenOf = (raw) => {
+  if (typeof raw !== 'string' || !raw.includes('"type":"direct"') || !raw.includes('"__wurl":"d:')) return null;
+  try {
+    const frame = JSON.parse(raw);
+    return frame?.type === 'direct' && typeof frame.data?.__wurl === 'string' ? frame.data.__wurl : null;
+  } catch {
+    return null;
+  }
+};
+const meshSend = node.mesh.send.bind(node.mesh);
+node.mesh.send = (peerId, data) => {
+  const token = tokenOf(data);
+  try {
+    const result = meshSend(peerId, data);
+    if (token) emit({ kind: 'hop-out', token, to: String(peerId), ok: true });
+    return result;
+  } catch (error) {
+    if (token) emit({ kind: 'hop-out', token, to: String(peerId), ok: false, error: String(error?.message ?? error) });
+    throw error;
+  }
+};
+node.mesh.on('peer:data', ({ peerId, data }) => {
+  const token = tokenOf(typeof data === 'string' ? data : (data?.toString?.() ?? ''));
+  if (token) emit({ kind: 'hop-in', token, from: String(peerId) });
+});
 node.mesh.on('peer:connected', (peerId) => emit({ kind: 'link-up', peer: String(peerId) }));
 node.mesh.on('peer:disconnected', (peerId) => emit({ kind: 'link-down', peer: String(peerId) }));
 

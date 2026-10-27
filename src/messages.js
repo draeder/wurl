@@ -186,8 +186,10 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
   const deliveries = new Map(); // token -> Map(peer index -> at)
   const finals = new Map();     // peer index -> { links, werift }
   const engines = new Map();
+  const hops = new Map();       // direct token -> [{ kind: hop-out | hop-in, at, peer, other, ok }]
   const exited = new Set();
   let doneCount = 0;
+  let ending = false;
   let formedAt = null;
   let steadySince = null;
   let settledAt = null;
@@ -223,9 +225,9 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
         joinedAt[i] = at;
         if (message.engine) engines.set(message.engine, (engines.get(message.engine) ?? 0) + 1);
       } else if (kind === 'link-up') {
-        sides[i].add(message.peer);
+        if (!ending) sides[i].add(message.peer);
       } else if (kind === 'link-down') {
-        sides[i].delete(message.peer);
+        if (!ending) sides[i].delete(message.peer); // shutting down drops every link: not news
       } else if (kind === 'sent') {
         sent.set(message.token, {
           token: message.token, from: i, sent: message.ok, sentAt: at, beforeMesh: settledAt === null,
@@ -235,6 +237,15 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
       } else if (kind === 'received') {
         if (!deliveries.has(message.token)) deliveries.set(message.token, new Map());
         if (!deliveries.get(message.token).has(i)) deliveries.get(message.token).set(i, at);
+      } else if (kind === 'hop-out' || kind === 'hop-in') {
+        if (!hops.has(message.token)) hops.set(message.token, []);
+        const other = message.to ?? message.from;
+        // The link as both ends report it at the moment the frame left.
+        const j = indexOf.get(other);
+        const link = kind !== 'hop-out' ? null
+          : sides[i].has(other) && j !== undefined && sides[j].has(ids[i]) ? 'up at both ends'
+            : sides[i].has(other) ? 'up only at the sender' : j !== undefined && sides[j].has(ids[i]) ? 'up only at the receiver' : 'down';
+        hops.get(message.token).push({ kind, at, peer: i, other, ok: message.ok !== false, error: message.error, link });
       } else if (kind === 'error') {
         onProgress(`peer ${i} error: ${message.message}`);
       }
@@ -289,6 +300,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     await sleep(100);
   }
 
+  ending = true;
   for (const child of children) { try { child.send({ type: 'final' }); } catch {} }
   const finalDeadline = wallClock() + 15_000;
   while (finals.size + [...exited].filter((i) => !finals.has(i)).length < count && wallClock() < finalDeadline) await sleep(50);
@@ -301,7 +313,24 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     const got = deliveries.get(m.token) ?? new Map();
     const arrived = [...m.to].filter((j) => got.has(j));
     const lateReceivers = [...m.to].filter((j) => joinedAt[j] !== null && joinedAt[j] > m.sentAt);
-    return { ...m, arrived, lateReceivers, lateArrived: lateReceivers.filter((j) => got.has(j)), latencies: arrived.map((j) => got.get(j) - m.sentAt) };
+    const result = { ...m, arrived, lateReceivers, lateArrived: lateReceivers.filter((j) => got.has(j)), latencies: arrived.map((j) => got.get(j) - m.sentAt) };
+    if (m.via === 'direct' && arrived.length === 0) result.trace = traceOf(m);
+    return result;
+  };
+  // Where a lost direct message went: every frame that left a peer, whether
+  // the next peer received it, and whether that link was up at both ends.
+  const traceOf = (m) => {
+    const events = hops.get(m.token) ?? [];
+    const outs = events.filter((e) => e.kind === 'hop-out');
+    const ins = events.filter((e) => e.kind === 'hop-in');
+    return outs.map((out) => {
+      const to = indexOf.get(out.other);
+      const arrived = to !== undefined && ins.some((e) => e.peer === to && e.other === ids[out.peer]);
+      return {
+        from: out.peer, to: to ?? out.other, at: out.at, sent: out.ok, error: out.error ?? null,
+        arrived, link: out.link,
+      };
+    });
   };
   const all = [...sent.values()].sort((a, b) => a.from - b.from);
   const werift = [...finals.values()].reduce((sum, f) => ({ count: sum.count + (f.werift?.count ?? 0), last: f.werift?.last ?? sum.last }), { count: 0, last: null });
