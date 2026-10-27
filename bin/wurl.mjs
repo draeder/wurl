@@ -145,7 +145,30 @@ if (PEERS > PUBLIC_PEER_LIMIT && !target.signalUrls.every(isLocalRelay) && !opt[
 const many = PEERS > 1;
 const short = (peerId) => String(peerId || '').slice(0, 8) || '?';
 const t = (seconds) => `${seconds.toFixed(2)}s`;
-const say = (line) => { if (!quiet) process.stderr.write(`${line}\n`); };
+// The status line redraws in place on a terminal; piped or redirected, each
+// update is its own line, so a log still reads in order.
+const LIVE = process.stderr.isTTY === true;
+let statusLine = null;
+const fit = (line) => {
+  const columns = process.stderr.columns || 0;
+  return columns > 1 && line.length >= columns ? `${line.slice(0, columns - 2)}…` : line;
+};
+const say = (line) => {
+  if (quiet) return;
+  if (LIVE && statusLine !== null) process.stderr.write('\r\x1b[K');
+  process.stderr.write(`${line}\n`);
+  if (LIVE && statusLine !== null) process.stderr.write(fit(statusLine));
+};
+const status = (line) => {
+  if (quiet) return;
+  if (!LIVE) { process.stderr.write(`${line}\n`); return; }
+  statusLine = line;
+  process.stderr.write(`\r\x1b[K${fit(line)}`);
+};
+const endStatus = () => {
+  if (LIVE && statusLine !== null && !quiet) process.stderr.write('\n');
+  statusLine = null;
+};
 
 await installWebRTC();
 containWeriftErrors();
@@ -180,7 +203,7 @@ if (opt.messages) {
     joinWindowS: Math.max(0, Number(opt['join-window'] ?? 20)),
     sendSpreadS: Math.max(0, Number(opt['send-spread'] ?? 10)),
     webrtc: ['native', 'werift', 'auto'].includes(opt.webrtc) ? opt.webrtc : 'auto',
-    onProgress: (line) => say(`* ${line}`),
+    onProgress: (line) => (/^\[\d/.test(line) ? status(`* ${line}`) : say(`* ${line}`)),
   });
   const ms = (list) => {
     if (!list.length) return '-';
@@ -188,6 +211,7 @@ if (opt.messages) {
     const at = (q) => Math.round(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]);
     return `median ${at(0.5)} ms, p95 ${at(0.95)} ms, max ${Math.round(sorted[sorted.length - 1])} ms`;
   };
+  endStatus();
   const { mesh, broadcast, direct, ids } = result;
   const n = ids.length;
   const meshOk = mesh.groups.length === 1 && mesh.groups[0] === n;
@@ -275,7 +299,7 @@ if (many && !quiet && !opt.verbose) {
   progress = setInterval(() => {
     const registered = peers.filter((p) => p.state.registeredAt !== null).length;
     const links = peers.map((p) => p.state.connected.size);
-    say(`* [${t(elapsed())}] registered ${registered}/${PEERS}; links per peer min ${Math.min(...links)} avg ${(links.reduce((a, b) => a + b, 0) / PEERS).toFixed(1)} max ${Math.max(...links)}`);
+    status(`* [${t(elapsed())}] registered ${registered}/${PEERS}; links per peer min ${Math.min(...links)} avg ${(links.reduce((a, b) => a + b, 0) / PEERS).toFixed(1)} max ${Math.max(...links)}`);
   }, 2000);
 }
 
@@ -305,6 +329,7 @@ await new Promise((resolve) => {
   }, 100);
 });
 clearInterval(progress);
+endStatus();
 
 // Summary.
 const results = peers.map((p) => ({
