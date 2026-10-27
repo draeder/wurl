@@ -1,7 +1,14 @@
-// wurl --messages: PeerPigeon peers in one room. Wait for one partial mesh,
-// then every peer broadcasts once (gossip should carry it to every other peer)
-// and sends one direct message to the peer halfway round, which is usually
-// not a neighbour, so the mesh has to route it.
+// wurl --messages: PeerPigeon peers in one room. Every peer broadcasts once
+// (gossip should carry it to every other peer) and sends one direct message to
+// the peer halfway round, which is usually not a neighbour, so the mesh has to
+// route it.
+//
+// By default the test is asynchronous, as a real P2P network is: each peer
+// joins at its own random time within the join window, and sends its broadcast
+// and its direct message at its own random times once it has a link, while
+// others are still joining and links are still forming. Nothing waits for the
+// mesh. --phased runs the old lockstep test instead: everyone joins at once,
+// the mesh must form and hold, then all broadcasts, then all direct messages.
 import { PeerPigeonNode } from './vendor/peerpigeon.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,7 +48,7 @@ function meshShape(ids, linksOf) {
  * Run the test. Returns { ids, mesh, broadcast, direct } for the report.
  * onProgress(line) gets one line per second while the mesh forms.
  */
-export async function runMessageTest({ target, peers: count, timeS = 60, waitS = 20, settleS = 3, onProgress = () => {} }) {
+async function runPhasedMessageTest({ target, peers: count, timeS = 60, waitS = 20, settleS = 3, onProgress = () => {} }) {
   const { minPeers: minLinks, maxPeers: maxLinks, tolerantPeers } = target.topology;
   const started = performance.now();
   const elapsed = () => (performance.now() - started) / 1000;
@@ -147,4 +154,133 @@ export async function runMessageTest({ target, peers: count, timeS = 60, waitS =
     direct,
     seconds: elapsed(),
   };
+}
+
+const jitter = (maxMs) => Math.floor(Math.random() * Math.max(0, maxMs));
+
+/**
+ * The asynchronous test. Every peer runs its own lifecycle concurrently:
+ * join at a random time in [0, joinWindowS), wait for a first link, then after
+ * its own random delays broadcast once and send one direct message. Deliveries
+ * are recorded as they happen; each latency is measured from that message's
+ * own send time.
+ */
+async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 20, joinWindowS = 20, sendSpreadS = 10, onProgress = () => {} }) {
+  const { minPeers: minLinks, maxPeers: maxLinks, tolerantPeers } = target.topology;
+  const started = performance.now();
+  const elapsed = () => (performance.now() - started) / 1000;
+  const deadline = started + timeS * 1000;
+  const urls = target.signalUrls?.length ? target.signalUrls : [target.signalUrl];
+  const run = Date.now().toString(36);
+  const nodes = [];
+  const received = [];
+  const joinedAt = new Array(count).fill(null);   // performance.now() when start() resolved
+  const ids = new Array(count).fill('');
+  const broadcasts = [];
+  const directs = [];
+
+  for (let i = 0; i < count; i += 1) {
+    const node = new PeerPigeonNode({
+      crypto: false,
+      networkId: target.network,
+      sessionId: target.room,
+      signalingServer: urls[i % urls.length],
+      minPeers: minLinks,
+      maxPeers: maxLinks,
+      tolerantPeers,
+    });
+    const inbox = new Map();
+    const take = (data) => {
+      const token = data && typeof data === 'object' ? data.__wurl : null;
+      if (typeof token === 'string' && !inbox.has(token)) inbox.set(token, performance.now());
+    };
+    node.gossip.on('messageReceived', ({ message, local }) => { if (!local) take(message?.data); });
+    node.gossip.on('directMessageReceived', ({ message }) => take(message?.data));
+    nodes.push(node);
+    received.push(inbox);
+  }
+
+  const linksOf = (node) => (node.mesh.getConnectedPeers() || []).map(String);
+  const snapshot = () => {
+    const live = nodes.map((node, i) => (joinedAt[i] !== null ? String(node.mesh.getClientId() || '') : '')).filter(Boolean);
+    const byId = new Map(nodes.map((node, i) => [ids[i], node]));
+    return meshShape(live, (id) => linksOf(byId.get(id)));
+  };
+
+  // Watch the mesh while everything else happens; it never gates anything.
+  let formedAt = null;
+  let watching = true;
+  let lastProgress = -1;
+  const watcher = (async () => {
+    while (watching) {
+      const shape = snapshot();
+      const joined = joinedAt.filter((at) => at !== null).length;
+      const formed = joined === count && shape.groups.length === 1 && Math.min(...shape.degrees) >= Math.min(minLinks, count - 1);
+      if (formed && formedAt === null) formedAt = elapsed();
+      if (Math.floor(elapsed()) !== lastProgress) {
+        lastProgress = Math.floor(elapsed());
+        const links = shape.degrees.length ? shape.degrees : [0];
+        onProgress(`[${elapsed().toFixed(1)}s] joined ${joined}/${count}; links per peer min ${Math.min(...links)} avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)} max ${Math.max(...links)}; ${shape.groups.length <= 1 ? 'one group' : `${shape.groups.length} groups`}; sent ${broadcasts.length} broadcasts, ${directs.length} direct`);
+      }
+      await sleep(250);
+    }
+  })();
+
+  const lifecycle = async (i) => {
+    const node = nodes[i];
+    await sleep(jitter(joinWindowS * 1000));
+    await node.start();
+    joinedAt[i] = performance.now();
+    ids[i] = String(node.mesh.getClientId() || '');
+    // A peer talks once it has someone to talk to, not when the network is done.
+    while (linksOf(node).length === 0 && performance.now() < deadline) await sleep(100);
+    await sleep(jitter(sendSpreadS * 1000));
+    const bToken = `b:${run}:${i}`;
+    const bAt = performance.now();
+    const bId = node.gossip.broadcast({ __wurl: bToken }, { sender: ids[i], timestamp: Date.now() });
+    broadcasts.push({ token: bToken, from: i, sent: Boolean(bId), sentAt: bAt, beforeMesh: formedAt === null, to: new Set(nodes.map((_, j) => j).filter((j) => j !== i)) });
+    await sleep(jitter(sendSpreadS * 1000));
+    // Only a peer that exists can be addressed: wait for the target to have joined.
+    const j = (i + Math.floor(count / 2)) % count;
+    while (!ids[j] && performance.now() < deadline) await sleep(100);
+    const dToken = `d:${run}:${i}:${j}`;
+    const dAt = performance.now();
+    const dId = ids[j] ? node.gossip.sendDirect(ids[j], { __wurl: dToken }) : null;
+    directs.push({ token: dToken, from: i, toIndex: j, sent: Boolean(dId), sentAt: dAt, beforeMesh: formedAt === null, to: new Set([j]), neighbour: linksOf(node).includes(ids[j]) });
+  };
+  await Promise.all(nodes.map((_, i) => lifecycle(i)));
+
+  // Wait for what is still in flight: until everything arrived, or waitS after the last send.
+  const lastSend = Math.max(0, ...broadcasts.map((m) => m.sentAt), ...directs.map((m) => m.sentAt));
+  const all = [...broadcasts, ...directs];
+  while (performance.now() < lastSend + waitS * 1000) {
+    if (all.every((m) => [...m.to].every((k) => received[k].has(m.token)))) break;
+    await sleep(100);
+  }
+  const shape = snapshot();
+  watching = false;
+  await watcher;
+  const own = nodes.map((node) => linksOf(node).length);
+  const settle = (m) => {
+    const arrived = [...m.to].filter((k) => received[k].has(m.token));
+    // Receivers that joined after this was sent can only get it by anti-entropy repair.
+    const lateReceivers = [...m.to].filter((k) => joinedAt[k] !== null && joinedAt[k] > m.sentAt);
+    return { ...m, arrived, lateReceivers, lateArrived: lateReceivers.filter((k) => received[k].has(m.token)), latencies: arrived.map((k) => received[k].get(m.token) - m.sentAt) };
+  };
+  await Promise.all(nodes.map((node) => node.destroy().catch(() => {})));
+  return {
+    ids,
+    mode: 'async',
+    joinWindowS,
+    sendSpreadS,
+    mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
+    broadcast: broadcasts.sort((a, b) => a.from - b.from).map(settle),
+    direct: directs.sort((a, b) => a.from - b.from).map(settle),
+    seconds: elapsed(),
+  };
+}
+
+/** Asynchronous by default; { phased: true } runs the lockstep test. */
+export async function runMessageTest(options) {
+  return options.phased ? { ...(await runPhasedMessageTest(options)), mode: 'phased' } : runAsyncMessageTest(options);
 }

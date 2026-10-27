@@ -101,11 +101,25 @@ wurl --messages -p 50 -t 120 --settle 15 --signal ws://127.0.0.1:8788/ws "https:
 
 `-m, --messages` runs the peers as PeerPigeon nodes, using PeerPigeon's own code
 bundled in `src/vendor/` (refresh it from `../PeerPigeon` with `npm run vendor:peerpigeon`).
-It waits for one partial mesh to hold steady for `--settle` seconds, then:
+Every peer:
 
-- every peer broadcasts once, and gossip should carry each broadcast to every other peer;
-- every peer sends one direct message to the peer halfway round, usually several
-  hops away, so the mesh has to route it.
+- broadcasts once, and gossip should carry each broadcast to every other peer;
+- sends one direct message to the peer halfway round, usually several hops away,
+  so the mesh has to route it.
+
+The test is asynchronous, as P2P is. Each peer joins at its own random time
+within `--join-window` seconds (default 20). Once it has a link, it sends its
+broadcast and then its direct message at its own random times, each up to
+`--send-spread` seconds (default 10) after the last. Nothing waits for the mesh,
+so messages go out while other peers are still joining and links are still forming.
+Each latency is measured from that message's own send time. The report also says
+how many messages went out before the mesh had formed, and how many broadcasts
+reached peers that joined after they were sent (only anti-entropy repair can
+deliver those).
+
+`--phased` runs the old lockstep test instead: everyone joins at once, one mesh
+must hold steady for `--settle` seconds, then all broadcasts go out, then all
+direct messages.
 
 The report gives the mesh shape (groups, links per peer), the broadcast and
 direct delivery counts with latency (median, p95, max), and names every peer
@@ -129,7 +143,10 @@ between the same pairs.
 | `--min-links <n>` | override minPeers |
 | `--max-links <n>` | override maxPeers |
 | `--tolerant <n>` | override tolerantPeers |
-| `--settle <s>` | how long the mesh must hold steady before sending (default 3) |
+| `--join-window <s>` | peers join at random times within this (default 20) |
+| `--send-spread <s>` | each send waits a random 0..s after the last (default 10) |
+| `--phased` | the lockstep test: all join at once, the mesh holds for `--settle`, then all broadcasts, then all direct |
+| `--settle <s>` | with `--phased`: how long the mesh must hold steady before sending (default 3) |
 | `--wait <s>` | how long to wait for messages to arrive (default 20) |
 
 ## Tests

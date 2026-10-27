@@ -67,14 +67,28 @@ it('an unreachable relay exits 6', async () => {
   assert.equal((await wurl(['-s', '-t', '3', 'http://127.0.0.1:9/?room=nobody'])).code, 6);
 });
 
-it('--messages: PeerPigeon peers form a mesh and every broadcast and direct message arrives', async (t) => {
+it('--messages --phased: PeerPigeon peers form a mesh and every broadcast and direct message arrives', async (t) => {
   const port = await startRelay(t);
-  const { code, stdout } = await wurl(['--messages', '--json', '-p', '5', '-t', '40', `http://127.0.0.1:${port}/?room=msg-${Date.now()}&topology=dense-mesh`]);
+  const { code, stdout } = await wurl(['--messages', '--phased', '--json', '-p', '5', '-t', '40', `http://127.0.0.1:${port}/?room=msg-${Date.now()}&topology=dense-mesh`]);
   const report = JSON.parse(stdout);
   assert.equal(code, 0, stdout);
   assert.equal(report.mesh.groups.length, 1);
   assert.equal(report.broadcast.delivered, report.broadcast.expected);
   assert.equal(report.direct.delivered, report.direct.expected);
+});
+
+// Asynchronous (the default): peers join over 5 s and send at their own times.
+// Known gap, kept visible: a peer that joins after a broadcast was sent does not
+// get it (PeerPigeon's anti-entropy repair does not reach late joiners), and a
+// direct message to a peer that has only just joined can be lost.
+it('--messages: asynchronous joins and sends, every message arrives', { todo: 'late joiners miss broadcasts sent before they joined (PeerPigeon anti-entropy)' }, async (t) => {
+  const port = await startRelay(t);
+  const { code, stdout } = await wurl(['--messages', '--json', '-p', '5', '-t', '40', '--join-window', '5', '--send-spread', '2', `http://127.0.0.1:${port}/?room=amsg-${Date.now()}&topology=dense-mesh`]);
+  const report = JSON.parse(stdout);
+  assert.equal(report.mode, 'async');
+  assert.equal(report.broadcast.delivered, report.broadcast.expected);
+  assert.equal(report.direct.delivered, report.direct.expected);
+  assert.equal(code, 0, stdout);
 });
 
 it('ten wurl peers in one process form one mesh', async (t) => {

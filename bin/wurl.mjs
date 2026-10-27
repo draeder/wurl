@@ -51,9 +51,14 @@ options:
   -d, --data <text>      send this on each data channel when it opens
   -v, --verbose          also show freertc's own signaling and WebRTC log
   -s, --silent           only the summary
-  -m, --messages         PeerPigeon test: the peers form a PeerPigeon partial mesh, then every
-                         peer broadcasts once and sends one direct message to a peer it is
-                         usually not linked to; reports delivery and latency
+  -m, --messages         PeerPigeon test: every peer broadcasts once and sends one direct message
+                         to a peer it is usually not linked to; reports delivery and latency.
+                         Asynchronous, as P2P is: each peer joins at its own random time and sends
+                         at its own random times once it has a link, while others are still joining
+      --join-window <s>  with --messages: peers join at random times within this (default 20)
+      --send-spread <s>  with --messages: each send waits a random 0..s after the last (default 10)
+      --phased           with --messages: the old lockstep test instead (all join at once, the mesh
+                         forms and holds for --settle, then all broadcasts, then all direct messages)
                          The topology comes from the URL, as on PeerPigeon's page:
                          ?topology=token-ring|star|partial-mesh|dense-mesh (default token-ring),
                          or ?minPeers= ?maxPeers= ?tolerantPeers= directly
@@ -61,7 +66,7 @@ options:
       --max-links <n>    with --messages: override maxPeers
       --tolerant <n>     with --messages: override tolerantPeers
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
-      --settle <s>       with --messages: how long the mesh must hold steady before sending (default 3)
+      --settle <s>       with --phased: how long the mesh must hold steady before sending (default 3)
       --json             the summary as JSON
   -h, --help
 
@@ -86,6 +91,9 @@ try {
       tolerant: { type: 'string' },
       wait: { type: 'string', default: '20' },
       settle: { type: 'string', default: '3' },
+      phased: { type: 'boolean', default: false },
+      'join-window': { type: 'string', default: '20' },
+      'send-spread': { type: 'string', default: '10' },
       connect: { type: 'string', short: 'c', default: '4' },
       time: { type: 'string', short: 't', default: '20' },
       data: { type: 'string', short: 'd' },
@@ -154,12 +162,18 @@ if (opt.messages) {
   const tp = target.topology;
   say(`* wurl --messages: ${PEERS} PeerPigeon peers on ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}`);
   say(`* topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
+  say(opt.phased
+    ? `* phased: all join at once, the mesh must hold for ${opt.settle}s, then all broadcasts, then all direct messages`
+    : `* asynchronous: peers join at random times within ${opt['join-window']}s and send at their own random times (0..${opt['send-spread']}s apart) once linked`);
   const result = await runMessageTest({
     target,
     peers: PEERS,
     timeS: TIME_S,
     waitS: Math.max(1, Number(opt.wait) || 20),
     settleS: Math.max(0, Number(opt.settle ?? 3)),
+    phased: opt.phased,
+    joinWindowS: Math.max(0, Number(opt['join-window'] ?? 20)),
+    sendSpreadS: Math.max(0, Number(opt['send-spread'] ?? 10)),
     onProgress: (line) => say(`* ${line}`),
   });
   const ms = (list) => {
@@ -180,7 +194,7 @@ if (opt.messages) {
   const ok = meshOk && fullB === n && deliveredD.length === n && overLimit === 0;
   if (opt.json) {
     console.log(JSON.stringify({
-      relay: target.signalUrl, network: target.network, room: target.room, peers: n, ok, topology: target.topology,
+      relay: target.signalUrl, network: target.network, room: target.room, peers: n, ok, topology: target.topology, mode: result.mode,
       mesh,
       broadcast: { senders_complete: fullB, delivered: deliveredB, expected: totalB, latencies_ms: broadcast.flatMap((m) => m.latencies.map(Math.round)) },
       direct: { delivered: deliveredD.length, expected: n, routed: routedD, failed: direct.filter((m) => m.arrived.length === 0).map((m) => ({ from: ids[m.from], to: ids[m.toIndex], sent: m.sent })) },
@@ -195,6 +209,12 @@ if (opt.messages) {
     console.log(`topology   ${target.topology.name}: minPeers ${mesh.minLinks}, maxPeers ${mesh.maxLinks}, tolerantPeers ${mesh.tolerantPeers} (from ${target.topology.source})`);
     console.log(`links      each peer's own count min ${Math.min(...own)}, avg ${(own.reduce((a, b) => a + b, 0) / own.length).toFixed(1)}, max ${Math.max(...own)}; ${over ? `${over} over maxPeers${overTolerant ? `, ${overTolerant} over maxPeers + tolerantPeers` : ''}` : 'none over maxPeers'}`);
     console.log(`mesh       ${n} peers: ${meshOk ? 'one group' : `${mesh.groups.length} groups (${mesh.groups.join(', ')})`}${mesh.formedAt === null ? ', never fully formed' : `, formed in ${mesh.formedAt.toFixed(1)}s`}; counting a link if either end lists it: min ${Math.min(...links)}, avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)}, max ${Math.max(...links)}`);
+    if (result.mode === 'async') {
+      const early = [...broadcast, ...direct].filter((m) => m.beforeMesh).length;
+      const late = broadcast.reduce((sum, m) => sum + m.lateReceivers.length, 0);
+      const lateGot = broadcast.reduce((sum, m) => sum + m.lateArrived.length, 0);
+      console.log(`async      joins spread over ${result.joinWindowS}s, sends ${result.sendSpreadS}s apart; ${early}/${broadcast.length + direct.length} messages sent before the mesh had formed; ${lateGot}/${late} broadcast deliveries to peers that joined after the send (anti-entropy)`);
+    }
     console.log(`broadcast  ${fullB}/${n} reached all ${n - 1} others; ${deliveredB}/${totalB} deliveries (${totalB ? ((deliveredB / totalB) * 100).toFixed(1) : 0}%); ${ms(broadcast.flatMap((m) => m.latencies))}`);
     const missed = ids.map((_, i) => ({ i, missed: broadcast.filter((m) => m.to.has(i) && !m.arrived.includes(i)).length })).filter((r) => r.missed).sort((a, b) => b.missed - a.missed);
     if (missed.length) console.log(`           missed broadcasts: ${missed.slice(0, 10).map((r) => `${short(r.i)} ${r.missed}`).join(', ')}${missed.length > 10 ? ` (+${missed.length - 10} more)` : ''}`);
