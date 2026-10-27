@@ -96,7 +96,7 @@ round trip.
 ## Broadcast and direct messages (`--messages`)
 
 ```
-wurl --messages -p 50 -t 120 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=wurl-50&topology=partial-mesh"
+wurl --messages -p 50 -t 120 --settle 15 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=wurl-50&topology=partial-mesh"
 ```
 
 `-m, --messages` runs the peers as PeerPigeon nodes, using PeerPigeon's own code
@@ -107,21 +107,19 @@ Every peer:
 - sends one direct message to the peer halfway round, usually several hops away,
   so the mesh has to route it.
 
-It runs the way a P2P network does. The peers are spread over worker threads
-(`--threads`, default one per CPU core), each with its own event loop, so peers
-on different threads run at the same time. Each peer joins at its own random
-time within `--join-window` seconds (default 20). Once it has a link, it sends
-its broadcast and then its direct message at its own random times, each up to
+The test is asynchronous, as P2P is. Each peer joins at its own random time
+within `--join-window` seconds (default 20). Once it has a link, it sends its
+broadcast and then its direct message at its own random times, each up to
 `--send-spread` seconds (default 10) after the last. Nothing waits for the mesh,
 so messages go out while other peers are still joining and links are still forming.
+Each latency is measured from that message's own send time. The report also says
+how many messages went out before the mesh had formed, and how many broadcasts
+reached peers that joined after they were sent (only anti-entropy repair can
+deliver those).
 
-Every event is printed the moment it happens, with its time and the peer:
-joins, links going up or down, the mesh splitting or joining up, every send,
-every direct message's arrival, and each broadcast once it has reached everyone.
-Add `-v` to see every single broadcast delivery too. Each latency is measured
-from that message's own send time. The summary also says how many messages went
-out before the mesh had formed, and how many broadcasts reached peers that joined
-after they were sent (only anti-entropy repair can deliver those).
+`--phased` runs the old lockstep test instead: everyone joins at once, one mesh
+must hold steady for `--settle` seconds, then all broadcasts go out, then all
+direct messages.
 
 The report gives the mesh shape (groups, links per peer), the broadcast and
 direct delivery counts with latency (median, p95, max), and names every peer
@@ -136,10 +134,9 @@ the preset doesn't apply, and the page's 2 / 5 / 1 is the starting point). The
 report shows the topology used, each peer's own link count against maxPeers, and
 the mesh counted by links either end lists, which differs when links are one-sided.
 
-On a local relay, 20 peers with `topology=partial-mesh` on 2 threads: the mesh
-formed at 21 s, half the messages went out before it had, broadcasts reached every
-peer that was present (median 15 ms), and none reached a peer that joined after
-it was sent.
+On a local relay, 30 peers with `topology=partial-mesh` and a 15 s settle: every peer
+kept 4–5 links, broadcast 870/870, and direct 16/30, failing in both directions
+between the same pairs.
 
 | Option | |
 | --- | --- |
@@ -148,7 +145,8 @@ it was sent.
 | `--tolerant <n>` | override tolerantPeers |
 | `--join-window <s>` | peers join at random times within this (default 20) |
 | `--send-spread <s>` | each send waits a random 0..s after the last (default 10) |
-| `--threads <n>` | worker threads to spread the peers over (default: CPU cores) |
+| `--phased` | the lockstep test: all join at once, the mesh holds for `--settle`, then all broadcasts, then all direct |
+| `--settle <s>` | with `--phased`: how long the mesh must hold steady before sending (default 3) |
 | `--wait <s>` | how long to wait for messages to arrive (default 20) |
 
 ## Tests
