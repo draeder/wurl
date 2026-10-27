@@ -227,17 +227,20 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
   })();
 
   let allJoinedAt = null;
+  let allLinkedAt = null;
   const lifecycle = async (i) => {
     const node = nodes[i];
     await sleep(jitter(joinWindowS * 1000));
     await node.start();
     joinedAt[i] = performance.now();
     ids[i] = String(node.mesh.getClientId() || '');
-    // No one sends until every peer has joined, so every broadcast has all
-    // its recipients in the room; after that each peer sends on its own time.
+    // No one sends until every peer has joined the mesh: in the room, and
+    // with at least one link (a peer with no link cannot receive anything
+    // yet). After that each peer sends on its own time.
     while (joinedAt.some((at) => at === null) && performance.now() < deadline) await sleep(100);
     if (allJoinedAt === null) allJoinedAt = (performance.now() - started) / 1000;
-    while (linksOf(node).length === 0 && performance.now() < deadline) await sleep(100);
+    while (nodes.some((peer) => linksOf(peer).length === 0) && performance.now() < deadline) await sleep(100);
+    if (allLinkedAt === null) allLinkedAt = (performance.now() - started) / 1000;
     await sleep(jitter(sendSpreadS * 1000));
     const bToken = `b:${run}:${i}`;
     const bAt = performance.now();
@@ -278,6 +281,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     joinWindowS,
     sendSpreadS,
     allJoinedAt,
+    allLinkedAt,
     mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
     broadcast: broadcasts.sort((a, b) => a.from - b.from).map(settle),
     direct: directs.sort((a, b) => a.from - b.from).map(settle),
