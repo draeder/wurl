@@ -53,8 +53,9 @@ options:
   -s, --silent           only the summary
   -m, --messages         PeerPigeon test: every peer broadcasts once and sends one direct message
                          to a peer it is usually not linked to; reports delivery and latency.
-                         Peers join at their own random times; once all have joined and each has a
-                         link, each sends at its own random times
+                         Peers join at their own random times; once the mesh is formed and settled
+                         (one group, minPeers links each, held for --settle), each sends at its own
+                         random times
       --join-window <s>  with --messages: peers join at random times within this (default 20)
       --send-spread <s>  with --messages: each send waits a random 0..s after the last (default 10)
       --phased           with --messages: the old lockstep test instead (all join at once, the mesh
@@ -66,7 +67,7 @@ options:
       --max-links <n>    with --messages: override maxPeers
       --tolerant <n>     with --messages: override tolerantPeers
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
-      --settle <s>       with --phased: how long the mesh must hold steady before sending (default 3)
+      --settle <s>       with --messages: how long the formed mesh must hold steady before anyone sends (default 3)
       --json             the summary as JSON
   -h, --help
 
@@ -164,7 +165,7 @@ if (opt.messages) {
   say(`* topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
   say(opt.phased
     ? `* phased: all join at once, the mesh must hold for ${opt.settle}s, then all broadcasts, then all direct messages`
-    : `* peers join at random times within ${opt['join-window']}s; once all have joined and each has a link, each sends at its own random times (0..${opt['send-spread']}s apart)`);
+    : `* peers join at random times within ${opt['join-window']}s; once the mesh is formed and has held for ${opt.settle}s, each sends at its own random times (0..${opt['send-spread']}s apart)`);
   const result = await runMessageTest({
     target,
     peers: PEERS,
@@ -213,7 +214,7 @@ if (opt.messages) {
       const early = [...broadcast, ...direct].filter((m) => m.beforeMesh).length;
       const late = broadcast.reduce((sum, m) => sum + m.lateReceivers.length, 0);
       const lateGot = broadcast.reduce((sum, m) => sum + m.lateArrived.length, 0);
-      console.log(`async      joins spread over ${result.joinWindowS}s, all ${n} joined at ${result.allJoinedAt === null ? 'never' : `${result.allJoinedAt.toFixed(1)}s`} and all had a link at ${result.allLinkedAt === null ? 'never' : `${result.allLinkedAt.toFixed(1)}s`}; then sends at random times up to ${result.sendSpreadS}s apart; ${early}/${broadcast.length + direct.length} messages sent before the mesh had formed`);
+      console.log(`async      joins spread over ${result.joinWindowS}s, all ${n} joined at ${result.allJoinedAt === null ? 'never' : `${result.allJoinedAt.toFixed(1)}s`} and all had a link at ${result.allLinkedAt === null ? 'never' : `${result.allLinkedAt.toFixed(1)}s`}; mesh settled at ${result.settledAt === null ? 'never' : `${result.settledAt.toFixed(1)}s`} (held ${result.settleS}s); then sends at random times up to ${result.sendSpreadS}s apart; ${early}/${broadcast.length + direct.length} messages sent before the mesh settled`);
     }
     console.log(`broadcast  ${fullB}/${n} reached all ${n - 1} others; ${deliveredB}/${totalB} deliveries (${totalB ? ((deliveredB / totalB) * 100).toFixed(1) : 0}%); ${ms(broadcast.flatMap((m) => m.latencies))}`);
     const missed = ids.map((_, i) => ({ i, missed: broadcast.filter((m) => m.to.has(i) && !m.arrived.includes(i)).length })).filter((r) => r.missed).sort((a, b) => b.missed - a.missed);

@@ -96,7 +96,7 @@ round trip.
 ## Broadcast and direct messages (`--messages`)
 
 ```
-wurl --messages -p 50 -t 120 --settle 15 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=wurl-50&topology=partial-mesh"
+wurl --messages -p 50 -t 120 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=wurl-50&topology=partial-mesh"
 ```
 
 `-m, --messages` runs the peers as PeerPigeon nodes, using PeerPigeon's own code
@@ -108,13 +108,14 @@ Every peer:
   so the mesh has to route it.
 
 The test is asynchronous, as P2P is. Each peer joins at its own random time
-within `--join-window` seconds (default 20). No one sends anything until every
-peer has joined and has at least one link, so every broadcast has all its
-recipients in the mesh. Then
+within `--join-window` seconds (default 20). No one sends anything until the
+mesh is formed and settled: every peer has joined, the peers are one group,
+each has at least `minPeers` links, and that has held for `--settle` seconds
+(default 3). Then
 each peer sends its broadcast and its direct message at its own random times,
 each up to `--send-spread` seconds (default 10) after the last, while links are
 still settling. Each latency is measured from that message's own send time, and
-the report says when the last peer joined, when the last one got a link, and how many messages went out before
+the report says when the last peer joined, when the last one got a link, when the mesh settled, and how many messages went out before
 the mesh had fully formed.
 
 `--phased` runs the old lockstep test instead: everyone joins at once, one mesh
@@ -146,7 +147,7 @@ between the same pairs.
 | `--join-window <s>` | peers join at random times within this (default 20) |
 | `--send-spread <s>` | each send waits a random 0..s after the last (default 10) |
 | `--phased` | the lockstep test: all join at once, the mesh holds for `--settle`, then all broadcasts, then all direct |
-| `--settle <s>` | with `--phased`: how long the mesh must hold steady before sending (default 3) |
+| `--settle <s>` | how long the formed mesh must hold steady before anyone sends (default 3) |
 | `--wait <s>` | how long to wait for messages to arrive (default 20) |
 
 ## Tests

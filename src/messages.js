@@ -165,7 +165,7 @@ const jitter = (maxMs) => Math.floor(Math.random() * Math.max(0, maxMs));
  * are recorded as they happen; each latency is measured from that message's
  * own send time.
  */
-async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 20, joinWindowS = 20, sendSpreadS = 10, onProgress = () => {} }) {
+async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 20, joinWindowS = 20, sendSpreadS = 10, settleS = 3, onProgress = () => {} }) {
   const { minPeers: minLinks, maxPeers: maxLinks, tolerantPeers } = target.topology;
   const started = performance.now();
   const elapsed = () => (performance.now() - started) / 1000;
@@ -207,8 +207,12 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     return meshShape(live, (id) => linksOf(byId.get(id)));
   };
 
-  // Watch the mesh while everything else happens; it never gates anything.
+  // Watch the mesh. It is formed when every peer has joined, it is one group,
+  // and every peer has at least minPeers links; it is settled once it has
+  // stayed formed for settleS. Nobody sends before it is settled.
   let formedAt = null;
+  let steadySince = null;
+  let settledAt = null;
   let watching = true;
   let lastProgress = -1;
   const watcher = (async () => {
@@ -217,6 +221,12 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
       const joined = joinedAt.filter((at) => at !== null).length;
       const formed = joined === count && shape.groups.length === 1 && Math.min(...shape.degrees) >= Math.min(minLinks, count - 1);
       if (formed && formedAt === null) formedAt = elapsed();
+      if (formed) {
+        steadySince ??= elapsed();
+        if (settledAt === null && elapsed() - steadySince >= settleS) settledAt = elapsed();
+      } else if (settledAt === null) {
+        steadySince = null;
+      }
       if (Math.floor(elapsed()) !== lastProgress) {
         lastProgress = Math.floor(elapsed());
         const links = shape.degrees.length ? shape.degrees : [0];
@@ -234,18 +244,19 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     await node.start();
     joinedAt[i] = performance.now();
     ids[i] = String(node.mesh.getClientId() || '');
-    // No one sends until every peer has joined the mesh: in the room, and
-    // with at least one link (a peer with no link cannot receive anything
-    // yet). After that each peer sends on its own time.
+    // No one sends until the mesh is formed and settled: every peer joined,
+    // one group, each with minPeers links, held for settleS. After that each
+    // peer sends on its own time.
     while (joinedAt.some((at) => at === null) && performance.now() < deadline) await sleep(100);
     if (allJoinedAt === null) allJoinedAt = (performance.now() - started) / 1000;
     while (nodes.some((peer) => linksOf(peer).length === 0) && performance.now() < deadline) await sleep(100);
     if (allLinkedAt === null) allLinkedAt = (performance.now() - started) / 1000;
+    while (settledAt === null && performance.now() < deadline) await sleep(100);
     await sleep(jitter(sendSpreadS * 1000));
     const bToken = `b:${run}:${i}`;
     const bAt = performance.now();
     const bId = node.gossip.broadcast({ __wurl: bToken }, { sender: ids[i], timestamp: Date.now() });
-    broadcasts.push({ token: bToken, from: i, sent: Boolean(bId), sentAt: bAt, beforeMesh: formedAt === null, to: new Set(nodes.map((_, j) => j).filter((j) => j !== i)) });
+    broadcasts.push({ token: bToken, from: i, sent: Boolean(bId), sentAt: bAt, beforeMesh: settledAt === null, to: new Set(nodes.map((_, j) => j).filter((j) => j !== i)) });
     await sleep(jitter(sendSpreadS * 1000));
     // Only a peer that exists can be addressed: wait for the target to have joined.
     const j = (i + Math.floor(count / 2)) % count;
@@ -253,7 +264,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     const dToken = `d:${run}:${i}:${j}`;
     const dAt = performance.now();
     const dId = ids[j] ? node.gossip.sendDirect(ids[j], { __wurl: dToken }) : null;
-    directs.push({ token: dToken, from: i, toIndex: j, sent: Boolean(dId), sentAt: dAt, beforeMesh: formedAt === null, to: new Set([j]), neighbour: linksOf(node).includes(ids[j]) });
+    directs.push({ token: dToken, from: i, toIndex: j, sent: Boolean(dId), sentAt: dAt, beforeMesh: settledAt === null, to: new Set([j]), neighbour: linksOf(node).includes(ids[j]) });
   };
   await Promise.all(nodes.map((_, i) => lifecycle(i)));
 
@@ -282,6 +293,8 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     sendSpreadS,
     allJoinedAt,
     allLinkedAt,
+    settledAt,
+    settleS,
     mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
     broadcast: broadcasts.sort((a, b) => a.from - b.from).map(settle),
     direct: directs.sort((a, b) => a.from - b.from).map(settle),
