@@ -107,6 +107,16 @@ Every peer:
 - sends one direct message to the peer halfway round, usually several hops away,
   so the mesh has to route it.
 
+Each peer runs in its own Node process, as a real peer runs on its own machine.
+The wurl process only coordinates: it starts each peer, follows the mesh from what
+the peers report, and tells them all to go once the mesh has settled.
+
+WebRTC is native by default: node-datachannel (libdatachannel, in C++), when it
+is installed, which it is with `npm install` (an optional dependency with
+prebuilt binaries). Without it, peers fall back to werift, which does DTLS and
+SCTP in JavaScript. `--webrtc native|werift|auto` chooses. On a 2-CPU machine,
+with 20 peers, the broadcast median was 9 ms native and 61 ms with werift.
+
 The test is asynchronous, as P2P is. Each peer joins at its own random time
 within `--join-window` seconds (default 20). No one sends anything until the
 mesh is formed and settled: every peer has joined, the peers are one group,
@@ -148,6 +158,7 @@ between the same pairs.
 | `--send-spread <s>` | each send waits a random 0..s after the last (default 10) |
 | `--phased` | the lockstep test: all join at once, the mesh holds for `--settle`, then all broadcasts, then all direct |
 | `--settle <s>` | how long the formed mesh must hold steady before anyone sends (default 3) |
+| `--webrtc <engine>` | `native` (node-datachannel), `werift`, or `auto` (native when installed; default) |
 | `--wait <s>` | how long to wait for messages to arrive (default 20) |
 
 ## Tests

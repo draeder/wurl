@@ -30,13 +30,39 @@ function patchWeriftClosedChannelAck(werift) {
   proto.__wurlClosedChannelAckPatch = true;
 }
 
-export function installWebRTC() {
+/** Which WebRTC this process uses: 'native' (node-datachannel, libdatachannel in C++) or 'werift' (pure JavaScript). */
+export let webrtcEngine = null;
+
+/**
+ * Install WebRTC and WebSocket globals for freertc's client.
+ * engine: 'native' needs node-datachannel; 'werift' is pure JavaScript; 'auto'
+ * (the default) uses native when node-datachannel is installed, else werift.
+ */
+export function installWebRTC({ engine = 'auto' } = {}) {
   installing ??= (async () => {
     if (typeof globalThis.WebSocket !== 'function') {
       const { WebSocket } = await import('ws');
       globalThis.WebSocket = WebSocket;
     }
-    if (typeof globalThis.RTCPeerConnection !== 'function') {
+    if (typeof globalThis.RTCPeerConnection === 'function') {
+      webrtcEngine ??= 'existing';
+      return;
+    }
+    if (engine !== 'werift') {
+      try {
+        const native = await import('node-datachannel/polyfill');
+        for (const name of WEBRTC_GLOBALS) {
+          if (globalThis[name] === undefined && native[name] !== undefined) globalThis[name] = native[name];
+        }
+        globalThis.RTCPeerConnection = native.RTCPeerConnection;
+        webrtcEngine = 'native';
+        return;
+      } catch (error) {
+        if (engine === 'native') throw new Error(`--webrtc native needs node-datachannel (npm install): ${error.message}`);
+      }
+    }
+    {
+      webrtcEngine = 'werift';
       const werift = await import('werift');
       patchWeriftClosedChannelAck(werift);
       for (const name of WEBRTC_GLOBALS) {

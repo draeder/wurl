@@ -22,5 +22,8 @@
     "werift": "0.24.4",
     "ws": "^8.18.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "optionalDependencies": {
+    "node-datachannel": "^0.32.0"
+  }
 }

@@ -157,138 +157,159 @@ async function runPhasedMessageTest({ target, peers: count, timeS = 60, waitS = 
 }
 
 const jitter = (maxMs) => Math.floor(Math.random() * Math.max(0, maxMs));
+const wallClock = () => performance.timeOrigin + performance.now(); // comparable across processes
 
 /**
- * The asynchronous test. Every peer runs its own lifecycle concurrently:
- * join at a random time in [0, joinWindowS), wait for a first link, then after
- * its own random delays broadcast once and send one direct message. Deliveries
- * are recorded as they happen; each latency is measured from that message's
- * own send time.
+ * The asynchronous test, one Node process per peer (message-peer.js), as real
+ * peers each run on their own machine. Each peer joins at its own random time
+ * within the join window. This process only watches: it builds the mesh from
+ * what the peers report, and once the mesh is formed (every peer joined, one
+ * group, each with minPeers links) and has held for settleS it tells every
+ * peer to go. Each then sends its broadcast and its direct message after its
+ * own random delays. Deliveries are recorded as the peers report them; each
+ * latency is measured from that message's own send time.
  */
-async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 20, joinWindowS = 20, sendSpreadS = 10, settleS = 3, onProgress = () => {} }) {
+async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 20, joinWindowS = 20, sendSpreadS = 10, settleS = 3, webrtc = 'auto', onProgress = () => {} }) {
+  const { fork } = await import('node:child_process');
   const { minPeers: minLinks, maxPeers: maxLinks, tolerantPeers } = target.topology;
-  const started = performance.now();
-  const elapsed = () => (performance.now() - started) / 1000;
+  const started = wallClock();
+  const elapsed = () => (wallClock() - started) / 1000;
   const deadline = started + timeS * 1000;
   const urls = target.signalUrls?.length ? target.signalUrls : [target.signalUrl];
   const run = Date.now().toString(36);
-  const nodes = [];
-  const received = [];
-  const joinedAt = new Array(count).fill(null);   // performance.now() when start() resolved
+
   const ids = new Array(count).fill('');
-  const broadcasts = [];
-  const directs = [];
-
-  for (let i = 0; i < count; i += 1) {
-    const node = new PeerPigeonNode({
-      crypto: false,
-      networkId: target.network,
-      sessionId: target.room,
-      signalingServer: urls[i % urls.length],
-      minPeers: minLinks,
-      maxPeers: maxLinks,
-      tolerantPeers,
-    });
-    const inbox = new Map();
-    const take = (data) => {
-      const token = data && typeof data === 'object' ? data.__wurl : null;
-      if (typeof token === 'string' && !inbox.has(token)) inbox.set(token, performance.now());
-    };
-    node.gossip.on('messageReceived', ({ message, local }) => { if (!local) take(message?.data); });
-    node.gossip.on('directMessageReceived', ({ message }) => take(message?.data));
-    nodes.push(node);
-    received.push(inbox);
-  }
-
-  const linksOf = (node) => (node.mesh.getConnectedPeers() || []).map(String);
-  const snapshot = () => {
-    const live = nodes.map((node, i) => (joinedAt[i] !== null ? String(node.mesh.getClientId() || '') : '')).filter(Boolean);
-    const byId = new Map(nodes.map((node, i) => [ids[i], node]));
-    return meshShape(live, (id) => linksOf(byId.get(id)));
-  };
-
-  // Watch the mesh. It is formed when every peer has joined, it is one group,
-  // and every peer has at least minPeers links; it is settled once it has
-  // stayed formed for settleS. Nobody sends before it is settled.
+  const indexOf = new Map();
+  const joinedAt = new Array(count).fill(null);
+  const sides = Array.from({ length: count }, () => new Set()); // links each peer itself reports
+  const sent = new Map();       // token -> { token, from, via, sentAt, to, ... }
+  const deliveries = new Map(); // token -> Map(peer index -> at)
+  const finals = new Map();     // peer index -> { links, werift }
+  const engines = new Map();
+  const exited = new Set();
+  let doneCount = 0;
   let formedAt = null;
   let steadySince = null;
   let settledAt = null;
-  let watching = true;
-  let lastProgress = -1;
-  const watcher = (async () => {
-    while (watching) {
-      const shape = snapshot();
-      const joined = joinedAt.filter((at) => at !== null).length;
-      const formed = joined === count && shape.groups.length === 1 && Math.min(...shape.degrees) >= Math.min(minLinks, count - 1);
-      if (formed && formedAt === null) formedAt = elapsed();
-      if (formed) {
-        steadySince ??= elapsed();
-        if (settledAt === null && elapsed() - steadySince >= settleS) settledAt = elapsed();
-      } else if (settledAt === null) {
-        steadySince = null;
-      }
-      if (Math.floor(elapsed()) !== lastProgress) {
-        lastProgress = Math.floor(elapsed());
-        const links = shape.degrees.length ? shape.degrees : [0];
-        onProgress(`[${elapsed().toFixed(1)}s] joined ${joined}/${count}; links per peer min ${Math.min(...links)} avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)} max ${Math.max(...links)}; ${shape.groups.length <= 1 ? 'one group' : `${shape.groups.length} groups`}; sent ${broadcasts.length} broadcasts, ${directs.length} direct`);
-      }
-      await sleep(250);
-    }
-  })();
-
   let allJoinedAt = null;
   let allLinkedAt = null;
-  const lifecycle = async (i) => {
-    const node = nodes[i];
-    await sleep(jitter(joinWindowS * 1000));
-    await node.start();
-    joinedAt[i] = performance.now();
-    ids[i] = String(node.mesh.getClientId() || '');
-    // No one sends until the mesh is formed and settled: every peer joined,
-    // one group, each with minPeers links, held for settleS. After that each
-    // peer sends on its own time.
-    while (joinedAt.some((at) => at === null) && performance.now() < deadline) await sleep(100);
-    if (allJoinedAt === null) allJoinedAt = (performance.now() - started) / 1000;
-    while (nodes.some((peer) => linksOf(peer).length === 0) && performance.now() < deadline) await sleep(100);
-    if (allLinkedAt === null) allLinkedAt = (performance.now() - started) / 1000;
-    while (settledAt === null && performance.now() < deadline) await sleep(100);
-    await sleep(jitter(sendSpreadS * 1000));
-    const bToken = `b:${run}:${i}`;
-    const bAt = performance.now();
-    const bId = node.gossip.broadcast({ __wurl: bToken }, { sender: ids[i], timestamp: Date.now() });
-    broadcasts.push({ token: bToken, from: i, sent: Boolean(bId), sentAt: bAt, beforeMesh: settledAt === null, to: new Set(nodes.map((_, j) => j).filter((j) => j !== i)) });
-    await sleep(jitter(sendSpreadS * 1000));
-    // Only a peer that exists can be addressed: wait for the target to have joined.
-    const j = (i + Math.floor(count / 2)) % count;
-    while (!ids[j] && performance.now() < deadline) await sleep(100);
-    const dToken = `d:${run}:${i}:${j}`;
-    const dAt = performance.now();
-    const dId = ids[j] ? node.gossip.sendDirect(ids[j], { __wurl: dToken }) : null;
-    directs.push({ token: dToken, from: i, toIndex: j, sent: Boolean(dId), sentAt: dAt, beforeMesh: settledAt === null, to: new Set([j]), neighbour: linksOf(node).includes(ids[j]) });
-  };
-  await Promise.all(nodes.map((_, i) => lifecycle(i)));
+  let lastProgress = -1;
 
-  // Wait for what is still in flight: until everything arrived, or waitS after the last send.
-  const lastSend = Math.max(0, ...broadcasts.map((m) => m.sentAt), ...directs.map((m) => m.sentAt));
-  const all = [...broadcasts, ...directs];
-  while (performance.now() < lastSend + waitS * 1000) {
-    if (all.every((m) => [...m.to].every((k) => received[k].has(m.token)))) break;
+  const children = Array.from({ length: count }, (_, i) => {
+    const child = fork(new URL('./message-peer.js', import.meta.url), [], {
+      env: {
+        ...process.env,
+        WURL_PEER: JSON.stringify({
+          i,
+          target: { network: target.network, room: target.room, topology: target.topology },
+          joinDelayMs: jitter(joinWindowS * 1000),
+          sendDelaysMs: [jitter(sendSpreadS * 1000), jitter(sendSpreadS * 1000)],
+          targetIndex: (i + Math.floor(count / 2)) % count,
+          signalUrl: urls[i % urls.length],
+          run,
+          engine: webrtc,
+        }),
+      },
+      stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+    });
+    child.on('message', (message) => {
+      if (message?.type === 'done') { doneCount += 1; return; }
+      if (message?.type === 'final') { finals.set(i, message); return; }
+      if (message?.type !== 'event') return;
+      const { at, kind } = message;
+      if (kind === 'joined') {
+        ids[i] = message.id;
+        indexOf.set(message.id, i);
+        joinedAt[i] = at;
+        if (message.engine) engines.set(message.engine, (engines.get(message.engine) ?? 0) + 1);
+      } else if (kind === 'link-up') {
+        sides[i].add(message.peer);
+      } else if (kind === 'link-down') {
+        sides[i].delete(message.peer);
+      } else if (kind === 'sent') {
+        sent.set(message.token, {
+          token: message.token, from: i, sent: message.ok, sentAt: at, beforeMesh: settledAt === null,
+          to: message.via === 'direct' ? new Set([message.to]) : new Set(children.map((_, j) => j).filter((j) => j !== i)),
+          via: message.via, toIndex: message.to, neighbour: Boolean(message.neighbour),
+        });
+      } else if (kind === 'received') {
+        if (!deliveries.has(message.token)) deliveries.set(message.token, new Map());
+        if (!deliveries.get(message.token).has(i)) deliveries.get(message.token).set(i, at);
+      } else if (kind === 'error') {
+        onProgress(`peer ${i} error: ${message.message}`);
+      }
+    });
+    child.on('exit', (code) => {
+      exited.add(i);
+      if (!finals.has(i) && code !== 0) onProgress(`peer ${i} process exited with code ${code}`);
+    });
+    return child;
+  });
+
+  // The mesh as the peers report it (a link counts if either end lists it).
+  const shapeNow = () => {
+    const live = ids.filter(Boolean);
+    return meshShape(live, (id) => [...sides[indexOf.get(id)]]);
+  };
+  const watchOnce = () => {
+    const shape = shapeNow();
+    const joined = joinedAt.filter((value) => value !== null).length;
+    const own = sides.map((set) => set.size);
+    if (allJoinedAt === null && joined === count) allJoinedAt = elapsed();
+    if (allLinkedAt === null && joined === count && own.every((n) => n > 0)) allLinkedAt = elapsed();
+    const formed = joined === count && shape.groups.length === 1 && Math.min(...shape.degrees) >= Math.min(minLinks, count - 1);
+    if (formed && formedAt === null) formedAt = elapsed();
+    if (formed) {
+      steadySince ??= elapsed();
+      if (settledAt === null && elapsed() - steadySince >= settleS) {
+        settledAt = elapsed();
+        for (const child of children) { try { child.send({ type: 'go', ids }); } catch {} }
+      }
+    } else if (settledAt === null) {
+      steadySince = null;
+    }
+    if (Math.floor(elapsed()) !== lastProgress) {
+      lastProgress = Math.floor(elapsed());
+      const links = own.length ? own : [0];
+      const broadcasts = [...sent.values()].filter((m) => m.via === 'broadcast').length;
+      onProgress(`[${elapsed().toFixed(1)}s] joined ${joined}/${count}; links per peer min ${Math.min(...links)} avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)} max ${Math.max(...links)}; ${shape.groups.length <= 1 ? 'one group' : `${shape.groups.length} groups`}; sent ${broadcasts} broadcasts, ${sent.size - broadcasts} direct`);
+    }
+  };
+
+  // Until every peer has sent (or the time is up), then until everything has
+  // arrived or waitS after the last send.
+  while (doneCount < count && wallClock() < deadline && exited.size < count) {
+    watchOnce();
+    await sleep(250);
+  }
+  const lastSend = Math.max(0, ...[...sent.values()].map((m) => m.sentAt));
+  const complete = () => [...sent.values()].every((m) => [...m.to].every((j) => deliveries.get(m.token)?.has(j)));
+  while (!complete() && wallClock() < lastSend + waitS * 1000) {
+    watchOnce();
     await sleep(100);
   }
-  const shape = snapshot();
-  watching = false;
-  await watcher;
-  const own = nodes.map((node) => linksOf(node).length);
+
+  for (const child of children) { try { child.send({ type: 'final' }); } catch {} }
+  const finalDeadline = wallClock() + 15_000;
+  while (finals.size + [...exited].filter((i) => !finals.has(i)).length < count && wallClock() < finalDeadline) await sleep(50);
+  for (const child of children) { try { child.kill(); } catch {} }
+
+  const linksAtEnd = (i) => finals.get(i)?.links ?? [...sides[i]];
+  const shape = meshShape(ids.filter(Boolean), (id) => linksAtEnd(indexOf.get(id)));
+  const own = ids.map((_, i) => linksAtEnd(i).length);
   const settle = (m) => {
-    const arrived = [...m.to].filter((k) => received[k].has(m.token));
-    // Receivers that joined after this was sent can only get it by anti-entropy repair.
-    const lateReceivers = [...m.to].filter((k) => joinedAt[k] !== null && joinedAt[k] > m.sentAt);
-    return { ...m, arrived, lateReceivers, lateArrived: lateReceivers.filter((k) => received[k].has(m.token)), latencies: arrived.map((k) => received[k].get(m.token) - m.sentAt) };
+    const got = deliveries.get(m.token) ?? new Map();
+    const arrived = [...m.to].filter((j) => got.has(j));
+    const lateReceivers = [...m.to].filter((j) => joinedAt[j] !== null && joinedAt[j] > m.sentAt);
+    return { ...m, arrived, lateReceivers, lateArrived: lateReceivers.filter((j) => got.has(j)), latencies: arrived.map((j) => got.get(j) - m.sentAt) };
   };
-  await Promise.all(nodes.map((node) => node.destroy().catch(() => {})));
+  const all = [...sent.values()].sort((a, b) => a.from - b.from);
+  const werift = [...finals.values()].reduce((sum, f) => ({ count: sum.count + (f.werift?.count ?? 0), last: f.werift?.last ?? sum.last }), { count: 0, last: null });
   return {
     ids,
     mode: 'async',
+    processes: count,
+    engines: Object.fromEntries(engines),
     joinWindowS,
     sendSpreadS,
     allJoinedAt,
@@ -296,8 +317,9 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     settledAt,
     settleS,
     mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
-    broadcast: broadcasts.sort((a, b) => a.from - b.from).map(settle),
-    direct: directs.sort((a, b) => a.from - b.from).map(settle),
+    broadcast: all.filter((m) => m.via === 'broadcast').map(settle),
+    direct: all.filter((m) => m.via === 'direct').map(settle),
+    werift,
     seconds: elapsed(),
   };
 }

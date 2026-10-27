@@ -68,6 +68,9 @@ options:
       --tolerant <n>     with --messages: override tolerantPeers
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
       --settle <s>       with --messages: how long the formed mesh must hold steady before anyone sends (default 3)
+      --webrtc <engine>  with --messages: native (node-datachannel, C++), werift (JavaScript), or auto:
+                         native when node-datachannel is installed, else werift (default auto).
+                         Each peer runs in its own Node process
       --json             the summary as JSON
   -h, --help
 
@@ -94,6 +97,7 @@ try {
       settle: { type: 'string', default: '3' },
       phased: { type: 'boolean', default: false },
       'join-window': { type: 'string', default: '20' },
+      webrtc: { type: 'string', default: 'auto' },
       'send-spread': { type: 'string', default: '10' },
       connect: { type: 'string', short: 'c', default: '4' },
       time: { type: 'string', short: 't', default: '20' },
@@ -175,6 +179,7 @@ if (opt.messages) {
     phased: opt.phased,
     joinWindowS: Math.max(0, Number(opt['join-window'] ?? 20)),
     sendSpreadS: Math.max(0, Number(opt['send-spread'] ?? 10)),
+    webrtc: ['native', 'werift', 'auto'].includes(opt.webrtc) ? opt.webrtc : 'auto',
     onProgress: (line) => say(`* ${line}`),
   });
   const ms = (list) => {
@@ -214,6 +219,7 @@ if (opt.messages) {
       const early = [...broadcast, ...direct].filter((m) => m.beforeMesh).length;
       const late = broadcast.reduce((sum, m) => sum + m.lateReceivers.length, 0);
       const lateGot = broadcast.reduce((sum, m) => sum + m.lateArrived.length, 0);
+      if (result.processes) console.log(`peers      ${result.processes} Node processes, one per peer; WebRTC ${Object.entries(result.engines || {}).map(([engine, n]) => `${engine} ${n}`).join(', ') || 'unknown'}`);
       console.log(`async      joins spread over ${result.joinWindowS}s, all ${n} joined at ${result.allJoinedAt === null ? 'never' : `${result.allJoinedAt.toFixed(1)}s`} and all had a link at ${result.allLinkedAt === null ? 'never' : `${result.allLinkedAt.toFixed(1)}s`}; mesh settled at ${result.settledAt === null ? 'never' : `${result.settledAt.toFixed(1)}s`} (held ${result.settleS}s); then sends at random times up to ${result.sendSpreadS}s apart; ${early}/${broadcast.length + direct.length} messages sent before the mesh settled`);
     }
     console.log(`broadcast  ${fullB}/${n} reached all ${n - 1} others; ${deliveredB}/${totalB} deliveries (${totalB ? ((deliveredB / totalB) * 100).toFixed(1) : 0}%); ${ms(broadcast.flatMap((m) => m.latencies))}`);
@@ -221,7 +227,7 @@ if (opt.messages) {
     if (missed.length) console.log(`           missed broadcasts: ${missed.slice(0, 10).map((r) => `${short(r.i)} ${r.missed}`).join(', ')}${missed.length > 10 ? ` (+${missed.length - 10} more)` : ''}`);
     console.log(`direct     ${deliveredD.length}/${n} delivered (${routedD} routed through the mesh, ${n - routedD} to a neighbour); ${ms(direct.flatMap((m) => m.latencies))}`);
     for (const m of direct.filter((d) => d.arrived.length === 0).slice(0, 10)) console.log(`           ${short(m.from)} -> ${short(m.toIndex)} not delivered${m.sent ? '' : ' (send refused)'}`);
-    if (weriftErrors.count) console.log(`werift     ${weriftErrors.count} internal error(s) contained, e.g. ${weriftErrors.last}`);
+    { const errors = result.werift ?? weriftErrors; if (errors.count) console.log(`werift     ${errors.count} internal error(s) contained, e.g. ${errors.last}`); }
     console.log(`result     ${ok ? 'OK' : 'FAILED'} (${result.seconds.toFixed(1)}s)`);
   }
   await reportCost({ peers: n, links: Math.round(mesh.own.reduce((a, b) => a + b, 0) / 2), json: opt.json });
