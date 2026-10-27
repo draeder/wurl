@@ -1,3 +1,2 @@
 node_modules/
 # freertc's install script lays out a relay deploy here; wurl does not use it.
-freertc-deploy/
