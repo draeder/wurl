@@ -18,7 +18,7 @@
     "vendor:peerpigeon": "node -e \"const fs=require('fs');const {execSync}=require('child_process');const sha=execSync('git -C ../PeerPigeon rev-parse --short HEAD').toString().trim();fs.writeFileSync('src/vendor/peerpigeon.js','// PeerPigeon '+sha+' (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.\\\\n// Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).\\\\n'+fs.readFileSync('../PeerPigeon/dist/index.js','utf8'));fs.copyFileSync('../PeerPigeon/dist/index.d.ts','src/vendor/peerpigeon.d.ts');console.log('vendored PeerPigeon '+sha)\""
   },
   "dependencies": {
-    "freertc": "github:draeder/freertc#b6f8de280a4fbe564df9d5147b39c82b28fe02fe",
+    "freertc": "github:draeder/freertc#46861baff893f3d2e09b12973e34b91942b77f3b",
     "werift": "0.24.4",
     "ws": "^8.18.0"
   },
