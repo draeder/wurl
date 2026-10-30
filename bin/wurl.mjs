@@ -227,6 +227,8 @@ if (opt.messages && opt.soak !== undefined) {
     console.log(JSON.stringify(result, null, 2));
   } else {
     console.log(`mesh       formed at ${result.firstFormedAt === null ? 'never' : clock(result.firstFormedAt)}; one group ${result.measuredSeconds ? `${((100 * result.oneGroupSeconds) / result.measuredSeconds).toFixed(2)}% of the time` : '-'} (most ${result.maxGroups} groups); ${result.linkDowns} links went down${Object.keys(result.linkDownReasons).length ? ` (${Object.entries(result.linkDownReasons).sort((a, b) => b[1] - a[1]).map(([why, n]) => `${why} ${n}`).join(', ')})` : ''}`);
+    const dials = Object.entries(result.dialReasons ?? {}).sort((x, y) => y[1] - x[1]);
+    console.log(`dials      ${dials.reduce((n, [, c]) => n + c, 0)}${dials.length ? ` (${dials.map(([why, c]) => `${why} ${c}`).join(', ')}; @max: the peer already had maxPeers links)` : ''}`);
     console.log(`rounds     ${result.rounds.length}, ${perfect} with every message delivered${worst && perfect < result.rounds.length ? `; worst round ${worst.round} (${(100 * worst.rate).toFixed(1)}%)` : ''}`);
     console.log(`broadcast  ${result.broadcast.got}/${result.broadcast.want} deliveries (${pct(result.broadcast.got, result.broadcast.want)})`);
     console.log(`direct     ${result.direct.got}/${result.direct.want} delivered (${pct(result.direct.got, result.direct.want)})`);
