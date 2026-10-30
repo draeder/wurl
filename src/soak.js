@@ -50,6 +50,9 @@ export async function runSoakTest({
   const deliveries = new Map();  // token -> Map(peer index -> at)
   let ending = false;
   let linkDowns = 0;
+  const minuteMembership = []; // each peer's membership size, sampled every 5 s this minute
+  const minuteDials = new Map(); // why -> dials started this minute (…@max: at maxPeers already)
+  const totalDials = new Map();
   const minuteWhy = new Map();   // reason -> links that went down this minute
   const totalWhy = new Map();
   const whyList = (map) => [...map.entries()].sort((a, b) => b[1] - a[1]).map(([why, n]) => `${why} ${n}`).join(', ');
@@ -91,11 +94,18 @@ export async function runSoakTest({
       } else if (kind === 'link-down') {
         sides[i].delete(message.peer);
         linkDowns += 1;
+        if (process.env.WURL_DIAL_LOG) onLine(`[${clock(elapsed())}] down ${message.why}: peer ${i} (${String(ids[i]).slice(0, 8)}) x ${String(message.peer).slice(0, 8)}${indexOf.has(message.peer) ? ` (peer ${indexOf.get(message.peer)})` : ' (not wurl\'s)'}`);
         const why = String(message.why || 'unknown');
         minuteWhy.set(why, (minuteWhy.get(why) ?? 0) + 1);
         totalWhy.set(why, (totalWhy.get(why) ?? 0) + 1);
+      } else if (kind === 'dial') {
+        const why = String(message.why || 'other');
+        minuteDials.set(why, (minuteDials.get(why) ?? 0) + 1);
+        if (process.env.WURL_DIAL_LOG) onLine(`[${clock(elapsed())}] dial ${why}: peer ${i} (${String(ids[i]).slice(0, 8)}) -> ${String(message.to).slice(0, 8)}${indexOf.has(message.to) ? ` (peer ${indexOf.get(message.to)})` : ' (not wurl\'s)'}; member ${message.member}, listed ${message.listed}, membership ${message.membership}`);
+        totalDials.set(why, (totalDials.get(why) ?? 0) + 1);
       } else if (kind === 'graph') {
         graphs.set(i, { at: wallClock(), edges: Array.isArray(message.edges) ? message.edges : [] });
+        if (Number.isFinite(message.membership)) minuteMembership.push(message.membership);
       } else if (kind === 'sent') {
         const r = rounds[message.round];
         if (!r) return;
@@ -174,8 +184,8 @@ export async function runSoakTest({
       }
       if (t - minuteStart >= 60) {
         const degrees = shape.degrees.length ? shape.degrees : [0];
-        onLine(`[${clock(t)}] mesh: ${joined}/${count} joined, ${shape.outside} not wurl's; one group ${minuteOneGroup}/${minuteSeconds} s this minute (most ${minuteMaxGroups} group${minuteMaxGroups === 1 ? '' : 's'}); links min ${Math.min(...degrees)} avg ${(degrees.reduce((a, b) => a + b, 0) / degrees.length).toFixed(1)} max ${Math.max(...degrees)}; ${linkDowns - minuteDowns} links went down${minuteWhy.size ? ` (${whyList(minuteWhy)})` : ''}`);
-        minuteWhy.clear(); minuteStart = t; minuteOneGroup = 0; minuteSeconds = 0; minuteMaxGroups = 0; minuteDowns = linkDowns;
+        onLine(`[${clock(t)}] mesh: ${joined}/${count} joined, ${shape.outside} not wurl's; one group ${minuteOneGroup}/${minuteSeconds} s this minute (most ${minuteMaxGroups} group${minuteMaxGroups === 1 ? '' : 's'}); links min ${Math.min(...degrees)} avg ${(degrees.reduce((a, b) => a + b, 0) / degrees.length).toFixed(1)} max ${Math.max(...degrees)}; ${linkDowns - minuteDowns} links went down${minuteWhy.size ? ` (${whyList(minuteWhy)})` : ''}${minuteMembership.length ? `; membership min ${Math.min(...minuteMembership)} max ${Math.max(...minuteMembership)} (of ${count - 1 + shape.outside} others)` : ''}; dials ${[...minuteDials.values()].reduce((x, y) => x + y, 0)}${minuteDials.size ? ` (${whyList(minuteDials)})` : ''}`);
+        minuteWhy.clear(); minuteDials.clear(); minuteMembership.length = 0; minuteStart = t; minuteOneGroup = 0; minuteSeconds = 0; minuteMaxGroups = 0; minuteDowns = linkDowns;
       }
       // The first round once everyone has joined and had time to link up,
       // whether or not the mesh is one group: a split mesh is what a round
@@ -211,6 +221,7 @@ export async function runSoakTest({
     soakS, roundS, ranS: elapsed(), peers: count, firstFormedAt,
     oneGroupSeconds: totalOneGroup, measuredSeconds: totalSeconds, maxGroups: maxGroupsEver, linkDowns,
     linkDownReasons: Object.fromEntries(totalWhy),
+    dialReasons: Object.fromEntries(totalDials),
     rounds: results,
     broadcast: { got: sum('bGot'), want: sum('bWant') },
     direct: { got: sum('dGot'), want: sum('dWant') },

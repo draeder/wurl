@@ -118,13 +118,55 @@ const graphTimer = setInterval(() => {
   if (!node.mesh.getClientId?.()) return;
   try {
     const edges = node.mesh.getGraphSnapshot().edges.map((edge) => [String(edge.source), String(edge.target)]);
-    emit({ kind: 'graph', edges });
+    emit({ kind: 'graph', edges, membership: node.mesh.getGlobalPeers().length });
   } catch {
     // best-effort
   }
 }, 5000);
 graphTimer.unref?.();
 node.mesh.on('peer:connected', (peerId) => emit({ kind: 'link-up', peer: String(peerId) }));
+// Why each dial happened, so link churn can be traced to what started it.
+// PeerPigeon logs its bridge and rebalance dials just before making them;
+// anything else is classified by where it came from and how many links this
+// peer held at that moment (a dial at maxPeers or more is one that will end
+// in a shed link).
+{
+  let pendingTag = null;
+  node.mesh.on('signaling:log', (event) => {
+    const text = String(event?.message ?? '');
+    if (text.startsWith('[bridge]')) pendingTag = 'bridge';
+    else if (text.startsWith('[rebalance]')) pendingTag = 'rebalance';
+  });
+  const dial = node.mesh.connectToPeerInternal?.bind(node.mesh);
+  if (dial) {
+    node.mesh.connectToPeerInternal = (peerId, allowTemporaryOverflow) => {
+      const links = node.mesh.getConnectedPeerCount();
+      const max = node.mesh.config?.maxPeers ?? Infinity;
+      const min = node.mesh.config?.minPeers ?? 0;
+      const already = node.mesh.peers?.has?.(peerId) || node.mesh.connecting?.has?.(peerId);
+      let why = pendingTag;
+      pendingTag = null;
+      if (!why) {
+        const stack = String(new Error().stack ?? '');
+        why = stack.includes('maybeRebalanceForCloserPeer') ? 'rebalance'
+          : links < min ? 'below-min'
+            : links < max ? 'fill'
+              : stack.includes('maintainPeerConnections') ? 'at-max' : 'other';
+      }
+      const result = dial(peerId, allowTemporaryOverflow);
+      const started = !already && (node.mesh.peers?.has?.(peerId) || node.mesh.connecting?.has?.(peerId));
+      if (started) {
+        const m = node.mesh;
+        emit({
+          kind: 'dial', why: links >= max ? `${why}@max` : why, to: String(peerId),
+          member: m.globalPeers?.has?.(peerId) ?? null, listed: m.activeSignalingPeers?.has?.(peerId) ?? null,
+          membership: m.globalPeers?.size ?? null,
+        });
+      }
+      return result;
+    };
+  }
+}
 // Why each link went down: closed by this peer (PeerPigeon's reason, e.g.
 // capacity_shed), or by the transport or the other end (remote:<reason>).
 const downReason = new Map();
