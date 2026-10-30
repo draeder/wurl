@@ -190,7 +190,21 @@ process.on('message', async (message) => {
     setTimeout(() => process.exit(0), 50);
   }
 });
-process.on('disconnect', () => process.exit(0));
+// Ctrl-C reaches every peer process at once, and a parent that dies leaves
+// its peers disconnected. Either way, say goodbye before exiting (destroy()
+// tells our neighbours we are leaving and waits for that to go out), so the
+// network drops us at once instead of waiting out our membership lease.
+const leave = async () => {
+  if (finishing) return;
+  finishing = true;
+  const quit = setTimeout(() => process.exit(0), 2000);
+  quit.unref?.();
+  await node.destroy().catch(() => {});
+  process.exit(0);
+};
+process.on('SIGINT', leave);
+process.on('SIGTERM', leave);
+process.on('disconnect', leave);
 
 try {
   await sleep(joinDelayMs);
