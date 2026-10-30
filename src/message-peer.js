@@ -107,6 +107,21 @@ const writeDiag = async (links) => {
     console.error('wurl diag:', error?.message ?? error);
   }
 };
+// The links PeerPigeon knows about between other peers, from its map of the
+// network (each peer's own topology report). wurl only hears the links its
+// own peers report, so when the mesh runs through peers that are not wurl's
+// (another wurl on another machine), the links among those peers come from
+// here. Without them one ring across two machines counted as a dozen groups.
+const graphTimer = setInterval(() => {
+  if (!node.mesh.getClientId?.()) return;
+  try {
+    const edges = node.mesh.getGraphSnapshot().edges.map((edge) => [String(edge.source), String(edge.target)]);
+    emit({ kind: 'graph', edges });
+  } catch {
+    // best-effort
+  }
+}, 5000);
+graphTimer.unref?.();
 node.mesh.on('peer:connected', (peerId) => emit({ kind: 'link-up', peer: String(peerId) }));
 node.mesh.on('peer:disconnected', (peerId) => emit({ kind: 'link-down', peer: String(peerId) }));
 

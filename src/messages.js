@@ -12,13 +12,19 @@
 import { PeerPigeonNode } from './vendor/peerpigeon.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const GRAPH_FRESH_MS = 12_000;
 
 // Peers that are not wurl's (a browser tab in the same room) are part of the
 // mesh too: a ring can pass through them. They join groups and count toward
 // links, but group sizes count wurl's peers only. Leaving them out split one
 // ring into as many "groups" as there were outside peers in it, and the mesh
 // never counted as formed.
-function meshShape(ids, linksOf) {
+//
+// The links between two outside peers come from PeerPigeon's own map of the
+// network (outsideLinks, [a, b] pairs): wurl's peers do not see them. Without
+// them a ring that ran through another wurl's peers on another machine counted
+// as one group per stretch of ours.
+function meshShape(ids, linksOf, outsideLinks = []) {
   const known = new Set(ids);
   const adjacency = new Map(ids.map((id) => [id, new Set()]));
   const outside = new Set();
@@ -32,6 +38,15 @@ function meshShape(ids, linksOf) {
       adjacency.get(id).add(other);
       adjacency.get(other).add(id);
     }
+  }
+  for (const [left, right] of outsideLinks) {
+    if (!left || !right || left === right || known.has(left) || known.has(right)) continue;
+    for (const peerId of [left, right]) {
+      outside.add(peerId);
+      if (!adjacency.has(peerId)) adjacency.set(peerId, new Set());
+    }
+    adjacency.get(left).add(right);
+    adjacency.get(right).add(left);
   }
   const groups = [];
   const seen = new Set();
@@ -198,6 +213,15 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
   const engines = new Map();
   const hops = new Map();       // direct token -> [{ kind: hop-out | hop-in, at, peer, other, ok }]
   const exited = new Set();
+  const graphs = new Map();     // peer index -> { at, edges }: PeerPigeon's map of the network
+  // Links between peers that are not wurl's, as wurl's peers' maps show them
+  // now (a map older than GRAPH_FRESH_MS is left out).
+  const outsideLinks = () => {
+    const cutoff = wallClock() - GRAPH_FRESH_MS;
+    const pairs = [];
+    for (const { at, edges } of graphs.values()) if (at >= cutoff) pairs.push(...edges);
+    return pairs;
+  };
   let doneCount = 0;
   let ending = false;
   let formedAt = null;
@@ -234,6 +258,8 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
         indexOf.set(message.id, i);
         joinedAt[i] = at;
         if (message.engine) engines.set(message.engine, (engines.get(message.engine) ?? 0) + 1);
+      } else if (kind === 'graph') {
+        if (!ending) graphs.set(i, { at: wallClock(), edges: Array.isArray(message.edges) ? message.edges : [] });
       } else if (kind === 'link-up') {
         if (!ending) sides[i].add(message.peer);
       } else if (kind === 'link-down') {
@@ -270,7 +296,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
   // The mesh as the peers report it (a link counts if either end lists it).
   const shapeNow = () => {
     const live = ids.filter(Boolean);
-    return meshShape(live, (id) => [...sides[indexOf.get(id)]]);
+    return meshShape(live, (id) => [...sides[indexOf.get(id)]], outsideLinks());
   };
   const watchOnce = () => {
     const shape = shapeNow();
@@ -317,7 +343,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
   for (const child of children) { try { child.kill(); } catch {} }
 
   const linksAtEnd = (i) => finals.get(i)?.links ?? [...sides[i]];
-  const shape = meshShape(ids.filter(Boolean), (id) => linksAtEnd(indexOf.get(id)));
+  const shape = meshShape(ids.filter(Boolean), (id) => linksAtEnd(indexOf.get(id)), outsideLinks());
   const own = ids.map((_, i) => linksAtEnd(i).length);
   const settle = (m) => {
     const got = deliveries.get(m.token) ?? new Map();
