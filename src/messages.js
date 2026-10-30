@@ -24,7 +24,7 @@ const GRAPH_FRESH_MS = 12_000;
 // network (outsideLinks, [a, b] pairs): wurl's peers do not see them. Without
 // them a ring that ran through another wurl's peers on another machine counted
 // as one group per stretch of ours.
-function meshShape(ids, linksOf, outsideLinks = []) {
+export function meshShape(ids, linksOf, outsideLinks = []) {
   const known = new Set(ids);
   const adjacency = new Map(ids.map((id) => [id, new Set()]));
   const outside = new Set();
@@ -137,7 +137,7 @@ async function runPhasedMessageTest({ target, peers: count, timeS = 60, waitS = 
   // What each peer itself reports: a link counts once per end, so a peer over
   // maxPeers here is over its own limit, not double-counted.
   const own = nodes.map((node) => linksOf(node).length);
-  const run = Date.now().toString(36);
+  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; // unique even for wurls started together
 
   async function deliver(messages) {
     // messages: [{ token, from (index), to: Set of indexes, sentAt }]
@@ -201,7 +201,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
   const elapsed = () => (wallClock() - started) / 1000;
   const deadline = started + timeS * 1000;
   const urls = target.signalUrls?.length ? target.signalUrls : [target.signalUrl];
-  const run = Date.now().toString(36);
+  const run = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; // unique even for wurls started together
 
   const ids = new Array(count).fill('');
   const indexOf = new Map();

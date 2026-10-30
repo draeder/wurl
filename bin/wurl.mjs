@@ -66,6 +66,12 @@ options:
       --min-links <n>    with --messages: override minPeers
       --max-links <n>    with --messages: override maxPeers
       --tolerant <n>     with --messages: override tolerantPeers
+      --soak <s>         with --messages: a long run instead. The peers join and stay for s seconds
+                         (28800 is 8 hours). Every --round seconds each peer sends one broadcast and one
+                         direct message, and wurl reports how many arrived; once a minute it reports the
+                         mesh (seconds in one group, most groups, links that went down). Run it on
+                         several machines in the same room to soak one mesh across them
+      --round <s>        with --soak: seconds between rounds of messages (default 300)
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
       --settle <s>       with --messages: how long the formed mesh must hold steady before anyone sends (default 3)
       --webrtc <engine>  with --messages: native (node-datachannel, C++), werift (JavaScript), or auto:
@@ -96,6 +102,8 @@ try {
       wait: { type: 'string', default: '20' },
       settle: { type: 'string', default: '3' },
       phased: { type: 'boolean', default: false },
+      soak: { type: 'string' },
+      round: { type: 'string', default: '300' },
       'join-window': { type: 'string', default: '20' },
       webrtc: { type: 'string', default: 'auto' },
       'send-spread': { type: 'string', default: '10' },
@@ -183,6 +191,49 @@ async function reportCost({ peers, links, json }) {
   if (json) console.log(JSON.stringify({ cost: rows, peers, links }, null, 2));
   else for (const line of formatCost(rows, { peers, links })) console.log(line);
   return rows;
+}
+
+if (opt.messages && opt.soak !== undefined) {
+  const soakS = Number(opt.soak);
+  if (!Number.isFinite(soakS) || soakS < 60) {
+    console.error('wurl: --soak takes the number of seconds to run, at least 60 (28800 is 8 hours)');
+    process.exit(2);
+  }
+  const roundS = Math.max(30, Number(opt.round) || 300);
+  const { runSoakTest, clock } = await import('../src/soak.js');
+  const tp = target.topology;
+  const line = (text) => console.log(`* ${text}`);
+  line(`wurl --messages --soak: ${PEERS} PeerPigeon peers on ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}, for ${clock(soakS)}`);
+  line(`topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
+  line(`peers join at random times within ${opt['join-window']}s and stay; a round of messages every ${roundS}s, a mesh report every minute`);
+  const result = await runSoakTest({
+    target,
+    peers: PEERS,
+    soakS,
+    roundS,
+    waitS: Math.max(1, Number(opt.wait) || 20),
+    joinWindowS: Math.max(0, Number(opt['join-window'] ?? 20)),
+    sendSpreadS: Math.max(0, Number(opt['send-spread'] ?? 10)),
+    webrtc: ['native', 'werift', 'auto'].includes(opt.webrtc) ? opt.webrtc : 'auto',
+    onLine: line,
+  });
+  const pct = (got, want) => (want ? `${((100 * got) / want).toFixed(2)}%` : '-');
+  const perfect = result.rounds.filter((r) => r.bGot === r.bWant && r.dGot === r.dWant).length;
+  const worst = result.rounds.reduce((low, r) => {
+    const rate = (r.bGot + r.dGot) / Math.max(1, r.bWant + r.dWant);
+    return !low || rate < low.rate ? { round: r.round + 1, rate } : low;
+  }, null);
+  if (opt.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(`mesh       formed at ${result.firstFormedAt === null ? 'never' : clock(result.firstFormedAt)}; one group ${result.measuredSeconds ? `${((100 * result.oneGroupSeconds) / result.measuredSeconds).toFixed(2)}% of the time` : '-'} (most ${result.maxGroups} groups); ${result.linkDowns} links went down`);
+    console.log(`rounds     ${result.rounds.length}, ${perfect} with every message delivered${worst && perfect < result.rounds.length ? `; worst round ${worst.round} (${(100 * worst.rate).toFixed(1)}%)` : ''}`);
+    console.log(`broadcast  ${result.broadcast.got}/${result.broadcast.want} deliveries (${pct(result.broadcast.got, result.broadcast.want)})`);
+    console.log(`direct     ${result.direct.got}/${result.direct.want} delivered (${pct(result.direct.got, result.direct.want)})`);
+    const ok = result.rounds.length > 0 && perfect === result.rounds.length;
+    console.log(`result     ${ok ? 'OK' : 'FAIL'} (${clock(result.ranS)})`);
+  }
+  process.exit(result.rounds.length > 0 && perfect === result.rounds.length ? 0 : 1);
 }
 
 if (opt.messages) {

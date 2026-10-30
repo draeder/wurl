@@ -172,6 +172,30 @@ membership and the relay list hold, and every link that went down and why.
 WURL_DIAG=/tmp/wurl-diag wurl --messages -p 50 -t 120 --signal ws://127.0.0.1:8788/ws "https://pigeon.peer.ooo/?sessionId=room-1&topology=token-ring"
 ```
 
+### Long runs (`--soak`)
+
+`--soak <s>` keeps the peers up for s seconds instead of stopping once the
+messages arrive. Every `--round` seconds (default 300) each peer sends one
+broadcast and one direct message, to a different peer each round, and wurl
+prints how many arrived. Once a minute it prints the mesh: how many of those
+seconds it was one group, the most groups it split into, and how many links
+went down. The summary at the end totals every round; the exit status is 0
+only if every message in every round arrived.
+
+Run it on several machines with the same room and relay to soak one mesh
+across them. Each wurl counts the other machines' peers as part of the mesh
+and tests its own peers' messages. Eight hours, 50 peers per machine:
+
+```
+caffeinate -is wurl --messages -p 50 --soak 28800 --signal ws://192.168.1.10:8788/ws "https://pigeon.peer.ooo/?sessionId=room-1&topology=token-ring" | tee ~/wurl-soak.log
+```
+
+```
+* [00:00:31] mesh formed: one group of 50 wurl peers and 50 that are not wurl's
+* [00:01:00] mesh: 50/50 joined, 50 not wurl's; one group 29/29 s this minute (most 1 group); links min 2 avg 2.0 max 2; 3 links went down
+* [00:05:36] round 1: broadcast 2450/2450 (100.0%), direct 50/50 (100.0%); 100/100 sent; median 30 ms, p95 140 ms
+```
+
 ## Tests
 
 ```

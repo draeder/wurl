@@ -3,6 +3,8 @@
 // mesh has settled; it reports every event back.
 //
 // From the parent:  { type: 'go', ids }   the mesh has settled: send, on this peer's own schedule
+//                   { type: 'round', round, ids, spreadMs }   --soak: send one broadcast and one
+//                                          direct message now, each after a random 0..spreadMs
 //                   { type: 'final' }      report links, then stop
 // To the parent:    { type: 'event', kind: 'joined' | 'link-up' | 'link-down' | 'sent' | 'received' | 'error', ... }
 //                   { type: 'done' }       this peer has sent everything it was going to
@@ -128,8 +130,30 @@ node.mesh.on('peer:disconnected', (peerId) => emit({ kind: 'link-down', peer: St
 let go = null;
 const settled = new Promise((resolve) => { go = resolve; });
 let finishing = false;
+// --soak: a round of one broadcast and one direct message, asked for by the
+// parent every --round seconds. The direct target moves round to round, so
+// over a long run every peer sends to many others.
+let joinedId = null;
+const soakRound = async ({ round, ids, spreadMs = 0 }) => {
+  if (!joinedId || finishing || !Array.isArray(ids) || ids.length < 2) return;
+  await sleep(Math.random() * spreadMs);
+  if (finishing) return;
+  const bToken = `b:${run}:r${round}:${i}`;
+  const bId = node.gossip.broadcast({ __wurl: bToken }, { sender: joinedId, timestamp: Date.now() });
+  emit({ kind: 'sent', token: bToken, via: 'broadcast', ok: Boolean(bId), round });
+  await sleep(Math.random() * spreadMs);
+  if (finishing) return;
+  const n = ids.length;
+  const toIndex = (i + 1 + (round % (n - 1))) % n;
+  const to = ids[toIndex];
+  const dToken = `d:${run}:r${round}:${i}:${toIndex}`;
+  const neighbour = Boolean(to) && linksOf().includes(to);
+  const dId = to ? node.gossip.sendDirect(to, { __wurl: dToken }) : null;
+  emit({ kind: 'sent', token: dToken, via: 'direct', to: toIndex, ok: Boolean(dId), neighbour, round });
+};
 process.on('message', async (message) => {
   if (message?.type === 'go') go(message.ids);
+  if (message?.type === 'round') soakRound(message).catch((error) => emit({ kind: 'error', message: String(error?.message ?? error) }));
   if (message?.type === 'final' && !finishing) {
     finishing = true;
     const links = linksOf();
@@ -146,6 +170,7 @@ try {
   await node.start();
   const id = String(node.mesh.getClientId() || '');
   emit({ kind: 'joined', id, engine: webrtcEngine });
+  joinedId = id;
 
   // Nobody sends until the parent has seen the mesh form and settle.
   const ids = await settled;
