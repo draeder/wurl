@@ -1,5 +1,3 @@
-// PeerPigeon cf260ec (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
-// Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/freertc-client-adapter.ts
 import { createSignalingClient, withdrawSignalingIdentity } from "freertc/client";
 var RECOVERY_PROBE_TIMEOUT_MS = 12e3;
@@ -962,7 +960,7 @@ var DEFAULT_ANTI_ENTROPY_REQUEST_SIZE = 64;
 var MAX_ROUTE_TRACE_PEERS = 32;
 var ROUTE_ACK_BATCH_MS = 150;
 var ROUTE_ACK_MAX_PEERS = 128;
-var _GossipProtocol = class _GossipProtocol {
+var GossipProtocol = class _GossipProtocol {
   constructor(mesh, options = {}) {
     this.messageLog = /* @__PURE__ */ new Map();
     this.maxTrackedMessages = 12e3;
@@ -1309,6 +1307,24 @@ var _GossipProtocol = class _GossipProtocol {
     const value = String(peerId ?? "").trim();
     return /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : sha1Hex(value);
   }
+  static {
+    // A repair round per retained message was a summary to every fan-out peer
+    // for every message that arrived: twenty-five a second on a busy link. One
+    // round per half second carries the same information; the two-second sync
+    // loop still runs behind it.
+    this.INITIAL_SPREAD_REPAIR_MIN_INTERVAL_MS = 500;
+  }
+  static {
+    this.MAX_REPLAYS_PER_PEER = 3;
+  }
+  static {
+    // A summary lists only the retained ids a peer has not been told about
+    // since its last full summary; the full list goes at most once per resend
+    // interval. Re-listing every id in flight on every change — a hundred and
+    // eighty ids, twenty kilobytes, three frames, a few times a second per
+    // link on a busy fleet — was the largest flow on every link.
+    this.ANTI_ENTROPY_RESEND_MS = 3e4;
+  }
   scheduleInitialSpreadRepair(_startedAt = Date.now()) {
     if (this.initialSpreadRepairQueued || this.destroyed) return;
     this.initialSpreadRepairQueued = true;
@@ -1447,7 +1463,7 @@ var _GossipProtocol = class _GossipProtocol {
       const retained = this.retainedMessages.get(messageId);
       if (!retained) continue;
       if (this.initialSpreadComplete(retained.message) || !this.canContinueInitialSpread(retained.message, fromPeerId)) continue;
-      const replays = retained.replayedTo ?? (retained.replayedTo = /* @__PURE__ */ new Map());
+      const replays = retained.replayedTo ??= /* @__PURE__ */ new Map();
       const replayed = replays.get(fromPeerId) ?? 0;
       if (replayed >= _GossipProtocol.MAX_REPLAYS_PER_PEER) continue;
       replays.set(fromPeerId, replayed + 1);
@@ -2800,19 +2816,6 @@ var _GossipProtocol = class _GossipProtocol {
     }
   }
 };
-// A repair round per retained message was a summary to every fan-out peer
-// for every message that arrived: twenty-five a second on a busy link. One
-// round per half second carries the same information; the two-second sync
-// loop still runs behind it.
-_GossipProtocol.INITIAL_SPREAD_REPAIR_MIN_INTERVAL_MS = 500;
-_GossipProtocol.MAX_REPLAYS_PER_PEER = 3;
-// A summary lists only the retained ids a peer has not been told about
-// since its last full summary; the full list goes at most once per resend
-// interval. Re-listing every id in flight on every change — a hundred and
-// eighty ids, twenty kilobytes, three frames, a few times a second per
-// link on a busy fleet — was the largest flow on every link.
-_GossipProtocol.ANTI_ENTROPY_RESEND_MS = 3e4;
-var GossipProtocol = _GossipProtocol;
 
 // src/relay-choice.ts
 var RELAY_CANDIDATES = 5;
@@ -6164,6 +6167,13 @@ var PartialMesh = class {
       const sorted = available.slice().sort((a, b) => this.compareDialCandidates(a, b));
       return sorted.slice(0, Math.min(count, sorted.length));
     };
+    const livePendingCount = Array.from(this.peers.values()).filter((peer) => !peer.connected && (this.activeSignalingPeers.has(peer.id) || this.meshCanSignal(peer.id))).length;
+    if (connectedCount < this.config.minPeers && connectedCount + livePendingCount < this.config.minPeers && available.length > 0) {
+      for (const peerId of pickCandidates(Math.max(1, this.config.minPeers - connectedCount))) {
+        this.connectToPeerInternal(peerId, true);
+      }
+      return;
+    }
     if (totalInProgress < this.config.minPeers) {
       const needed = this.config.minPeers - totalInProgress;
       const emergencyBurst = emergencyIsolated ? Math.min(3, Math.max(2, available.length)) : 0;
