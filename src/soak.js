@@ -50,6 +50,9 @@ export async function runSoakTest({
   const deliveries = new Map();  // token -> Map(peer index -> at)
   let ending = false;
   let linkDowns = 0;
+  const minuteWhy = new Map();   // reason -> links that went down this minute
+  const totalWhy = new Map();
+  const whyList = (map) => [...map.entries()].sort((a, b) => b[1] - a[1]).map(([why, n]) => `${why} ${n}`).join(', ');
   let firstFormedAt = null;
 
   const outsideLinks = () => {
@@ -88,6 +91,9 @@ export async function runSoakTest({
       } else if (kind === 'link-down') {
         sides[i].delete(message.peer);
         linkDowns += 1;
+        const why = String(message.why || 'unknown');
+        minuteWhy.set(why, (minuteWhy.get(why) ?? 0) + 1);
+        totalWhy.set(why, (totalWhy.get(why) ?? 0) + 1);
       } else if (kind === 'graph') {
         graphs.set(i, { at: wallClock(), edges: Array.isArray(message.edges) ? message.edges : [] });
       } else if (kind === 'sent') {
@@ -168,8 +174,8 @@ export async function runSoakTest({
       }
       if (t - minuteStart >= 60) {
         const degrees = shape.degrees.length ? shape.degrees : [0];
-        onLine(`[${clock(t)}] mesh: ${joined}/${count} joined, ${shape.outside} not wurl's; one group ${minuteOneGroup}/${minuteSeconds} s this minute (most ${minuteMaxGroups} group${minuteMaxGroups === 1 ? '' : 's'}); links min ${Math.min(...degrees)} avg ${(degrees.reduce((a, b) => a + b, 0) / degrees.length).toFixed(1)} max ${Math.max(...degrees)}; ${linkDowns - minuteDowns} links went down`);
-        minuteStart = t; minuteOneGroup = 0; minuteSeconds = 0; minuteMaxGroups = 0; minuteDowns = linkDowns;
+        onLine(`[${clock(t)}] mesh: ${joined}/${count} joined, ${shape.outside} not wurl's; one group ${minuteOneGroup}/${minuteSeconds} s this minute (most ${minuteMaxGroups} group${minuteMaxGroups === 1 ? '' : 's'}); links min ${Math.min(...degrees)} avg ${(degrees.reduce((a, b) => a + b, 0) / degrees.length).toFixed(1)} max ${Math.max(...degrees)}; ${linkDowns - minuteDowns} links went down${minuteWhy.size ? ` (${whyList(minuteWhy)})` : ''}`);
+        minuteWhy.clear(); minuteStart = t; minuteOneGroup = 0; minuteSeconds = 0; minuteMaxGroups = 0; minuteDowns = linkDowns;
       }
       // The first round once everyone has joined and had time to link up,
       // whether or not the mesh is one group: a split mesh is what a round
@@ -204,6 +210,7 @@ export async function runSoakTest({
   return {
     soakS, roundS, ranS: elapsed(), peers: count, firstFormedAt,
     oneGroupSeconds: totalOneGroup, measuredSeconds: totalSeconds, maxGroups: maxGroupsEver, linkDowns,
+    linkDownReasons: Object.fromEntries(totalWhy),
     rounds: results,
     broadcast: { got: sum('bGot'), want: sum('bWant') },
     direct: { got: sum('dGot'), want: sum('dWant') },

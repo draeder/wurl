@@ -125,7 +125,34 @@ const graphTimer = setInterval(() => {
 }, 5000);
 graphTimer.unref?.();
 node.mesh.on('peer:connected', (peerId) => emit({ kind: 'link-up', peer: String(peerId) }));
-node.mesh.on('peer:disconnected', (peerId) => emit({ kind: 'link-down', peer: String(peerId) }));
+// Why each link went down: closed by this peer (PeerPigeon's reason, e.g.
+// capacity_shed), or by the transport or the other end (remote:<reason>).
+const downReason = new Map();
+{
+  const disconnect = node.mesh.disconnectFromPeer.bind(node.mesh);
+  node.mesh.disconnectFromPeer = (peerId, reason = 'local_close') => {
+    downReason.set(String(peerId), { why: String(reason), at: now() });
+    return disconnect(peerId, reason);
+  };
+  const watch = setInterval(() => {
+    const client = node.mesh.signalingClient;
+    if (!client || client.__wurlWhy) return;
+    client.__wurlWhy = true;
+    client.on('rtc:disconnected', (data) => {
+      const peer = String(data?.peerId);
+      const known = downReason.get(peer);
+      if (!known || now() - known.at > 2000) downReason.set(peer, { why: `remote:${data?.reason ?? 'closed'}`, at: now() });
+    });
+  }, 200);
+  watch.unref?.();
+}
+node.mesh.on('peer:disconnected', (peerId) => {
+  const peer = String(peerId);
+  const known = downReason.get(peer);
+  const why = known && now() - known.at < 5000 ? known.why : 'unknown';
+  downReason.delete(peer);
+  emit({ kind: 'link-down', peer, why });
+});
 
 let go = null;
 const settled = new Promise((resolve) => { go = resolve; });
