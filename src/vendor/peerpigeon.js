@@ -1,4 +1,4 @@
-// PeerPigeon bb37372 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon cf260ec (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/freertc-client-adapter.ts
 import { createSignalingClient, withdrawSignalingIdentity } from "freertc/client";
@@ -6182,7 +6182,13 @@ var PartialMesh = class {
     } else if (connectedCount > this.config.maxPeers) {
       this.trimExcessPeers();
     } else if (connectedCount >= this.config.maxPeers && pendingCount < this.config.tolerantPeers && available.length > 0) {
-      const foreign = available.filter((peerId) => !this.globalPeers.has(peerId) && this.activeSignalingPeers.has(peerId));
+      const selfId = this.normalizePeerId(this.clientId);
+      const ourListed = [selfId, ...Array.from(this.globalPeers).filter((peerId) => this.activeSignalingPeers.has(peerId))];
+      const weAreNearest = (peerId) => {
+        const mine = this.peerDistance(selfId, peerId);
+        return ourListed.every((member) => member === selfId || this.peerDistance(member, peerId) > mine);
+      };
+      const foreign = available.filter((peerId) => !this.globalPeers.has(peerId) && this.activeSignalingPeers.has(peerId) && weAreNearest(peerId));
       if (foreign.length > 0 && now - this.lastBridgeDialAtMs >= BRIDGE_DIAL_INTERVAL_MS) {
         this.lastBridgeDialAtMs = now;
         const target = foreign.slice().sort((a, b) => this.compareDialCandidates(a, b))[0];

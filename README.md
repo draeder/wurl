@@ -161,6 +161,17 @@ between the same pairs.
 | `--webrtc <engine>` | `native` (node-datachannel), `werift`, or `auto` (native when installed; default) |
 | `--wait <s>` | how long to wait for messages to arrive (default 20) |
 
+### When the mesh does not form
+
+Set `WURL_DIAG` to a folder and each peer writes what it saw there when the run
+ends, one `<n>.json` per peer: its links, its two ring neighbours and whether
+each is linked, listed by the relay or still connecting, how many peers its
+membership and the relay list hold, and every link that went down and why.
+
+```
+WURL_DIAG=/tmp/wurl-diag wurl --messages -p 50 -t 120 --signal ws://127.0.0.1:8788/ws "https://pigeon.peer.ooo/?sessionId=room-1&topology=token-ring"
+```
+
 ## Tests
 
 ```

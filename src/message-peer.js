@@ -63,6 +63,50 @@ node.mesh.on('peer:data', ({ peerId, data }) => {
   const token = tokenOf(typeof data === 'string' ? data : (data?.toString?.() ?? ''));
   if (token) emit({ kind: 'hop-in', token, from: String(peerId) });
 });
+// WURL_DIAG=<dir>: each peer writes what it saw to <dir>/<n>.json when the run
+// ends (its links, its ring neighbours, why links went down, the relay), so a
+// mesh that did not form can be read afterwards.
+const DIAG_DIR = process.env.WURL_DIAG || '';
+const linkDowns = [];
+if (DIAG_DIR) {
+  const stamp = () => Math.round(now());
+  const disconnect = node.mesh.disconnectFromPeer.bind(node.mesh);
+  node.mesh.disconnectFromPeer = (peerId, reason) => {
+    linkDowns.push({ at: stamp(), peer: String(peerId), why: `local:${reason}` });
+    return disconnect(peerId, reason);
+  };
+  const watch = setInterval(() => {
+    const client = node.mesh.signalingClient;
+    if (!client || client.__wurlDiag) return;
+    client.__wurlDiag = true;
+    client.on('rtc:disconnected', (data) => linkDowns.push({ at: stamp(), peer: String(data?.peerId), why: `remote:${data?.reason}` }));
+  }, 200);
+  watch.unref?.();
+}
+const writeDiag = async (links) => {
+  if (!DIAG_DIR) return;
+  try {
+    const m = node.mesh;
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    fs.mkdirSync(DIAG_DIR, { recursive: true });
+    const short = (id) => String(id).slice(0, 8);
+    const connected = new Set(m.getConnectedPeers());
+    const coordinate = [...(m.cecrCoordinateNeighbors?.() ?? [])];
+    fs.writeFileSync(path.join(DIAG_DIR, `${i}.json`), JSON.stringify({
+      i, id: m.getClientId(), links,
+      coordinate: coordinate.map((peerId) => ({ peer: peerId, linked: connected.has(peerId), relayListed: m.activeSignalingPeers?.has(peerId) ?? null, connecting: m.connecting?.has(peerId) ?? null, backedOff: m.isPeerBackedOff?.(peerId) ?? null })),
+      membership: m.getGlobalPeers().length,
+      relayListed: m.activeSignalingPeers?.size ?? null,
+      foreignListed: [...(m.activeSignalingPeers ?? [])].filter((peerId) => !m.globalPeers?.has(peerId)).map(short),
+      pending: m.getPendingPeerCount?.() ?? null,
+      relay: { connected: m.signalingClient?.isConnected?.() ?? null, idle: m.signalingClient?.client?.relayIdle ?? null },
+      linkDowns,
+    }));
+  } catch (error) {
+    console.error('wurl diag:', error?.message ?? error);
+  }
+};
 node.mesh.on('peer:connected', (peerId) => emit({ kind: 'link-up', peer: String(peerId) }));
 node.mesh.on('peer:disconnected', (peerId) => emit({ kind: 'link-down', peer: String(peerId) }));
 
@@ -74,6 +118,7 @@ process.on('message', async (message) => {
   if (message?.type === 'final' && !finishing) {
     finishing = true;
     const links = linksOf();
+    await writeDiag(links);
     await node.destroy().catch(() => {});
     report({ type: 'final', links, werift: { count: weriftErrors.count, last: weriftErrors.last } });
     setTimeout(() => process.exit(0), 50);
