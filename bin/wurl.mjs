@@ -238,7 +238,7 @@ if (opt.messages) {
     const overTolerant = mesh.own.filter((c) => c > mesh.maxLinks + mesh.tolerantPeers).length;
     console.log(`topology   ${target.topology.name}: minPeers ${mesh.minLinks}, maxPeers ${mesh.maxLinks}, tolerantPeers ${mesh.tolerantPeers} (from ${target.topology.source})`);
     console.log(`links      each peer's own count min ${Math.min(...own)}, avg ${(own.reduce((a, b) => a + b, 0) / own.length).toFixed(1)}, max ${Math.max(...own)}; ${over ? `${over} over maxPeers${overTolerant ? `, ${overTolerant} over maxPeers + tolerantPeers` : ''}` : 'none over maxPeers'}`);
-    console.log(`mesh       ${n} peers: ${meshOk ? 'one group' : `${mesh.groups.length} groups (${mesh.groups.join(', ')})`}${mesh.formedAt === null ? ', never fully formed' : `, formed in ${mesh.formedAt.toFixed(1)}s`}; counting a link if either end lists it: min ${Math.min(...links)}, avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)}, max ${Math.max(...links)}`);
+    console.log(`mesh       ${n} peers: ${meshOk ? 'one group' : `${mesh.groups.length} groups (${mesh.groups.join(', ')})`}${mesh.formedAt === null ? ', never fully formed' : `, formed in ${mesh.formedAt.toFixed(1)}s`}; counting a link if either end lists it: min ${Math.min(...links)}, avg ${(links.reduce((a, b) => a + b, 0) / links.length).toFixed(1)}, max ${Math.max(...links)}${mesh.outside ? `; ${mesh.outside} peer(s) in the mesh that are not wurl's` : ''}`);
     if (result.mode === 'async') {
       const early = [...broadcast, ...direct].filter((m) => m.beforeMesh).length;
       const late = broadcast.reduce((sum, m) => sum + m.lateReceivers.length, 0);

@@ -13,12 +13,22 @@ import { PeerPigeonNode } from './vendor/peerpigeon.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Peers that are not wurl's (a browser tab in the same room) are part of the
+// mesh too: a ring can pass through them. They join groups and count toward
+// links, but group sizes count wurl's peers only. Leaving them out split one
+// ring into as many "groups" as there were outside peers in it, and the mesh
+// never counted as formed.
 function meshShape(ids, linksOf) {
   const known = new Set(ids);
   const adjacency = new Map(ids.map((id) => [id, new Set()]));
+  const outside = new Set();
   for (const id of ids) {
     for (const other of linksOf(id)) {
-      if (!known.has(other)) continue;
+      if (!other || other === id) continue;
+      if (!known.has(other)) {
+        outside.add(other);
+        if (!adjacency.has(other)) adjacency.set(other, new Set());
+      }
       adjacency.get(id).add(other);
       adjacency.get(other).add(id);
     }
@@ -32,7 +42,7 @@ function meshShape(ids, linksOf) {
     let size = 0;
     while (queue.length) {
       const next = queue.shift();
-      size += 1;
+      if (known.has(next)) size += 1;
       for (const other of adjacency.get(next)) {
         if (!seen.has(other)) { seen.add(other); queue.push(other); }
       }
@@ -41,7 +51,7 @@ function meshShape(ids, linksOf) {
   }
   groups.sort((a, b) => b - a);
   const degrees = ids.map((id) => adjacency.get(id).size);
-  return { groups, degrees, adjacency };
+  return { groups, degrees, adjacency, outside: outside.size };
 }
 
 /**
@@ -149,7 +159,7 @@ async function runPhasedMessageTest({ target, peers: count, timeS = 60, waitS = 
   await Promise.all(nodes.map((node) => node.destroy().catch(() => {})));
   return {
     ids,
-    mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
+    mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, outside: shape.outside, own, minLinks, maxLinks, tolerantPeers },
     broadcast,
     direct,
     seconds: elapsed(),
@@ -345,7 +355,7 @@ async function runAsyncMessageTest({ target, peers: count, timeS = 120, waitS = 
     allLinkedAt,
     settledAt,
     settleS,
-    mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, own, minLinks, maxLinks, tolerantPeers },
+    mesh: { formedAt, groups: shape.groups, degrees: shape.degrees, outside: shape.outside, own, minLinks, maxLinks, tolerantPeers },
     broadcast: all.filter((m) => m.via === 'broadcast').map(settle),
     direct: all.filter((m) => m.via === 'direct').map(settle),
     werift,
