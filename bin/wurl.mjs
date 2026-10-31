@@ -156,14 +156,31 @@ if (target.auto && opt.messages) {
       console.error(`wurl: relays from the DNS directory (peers choose; each falls back on its own):`);
       for (const record of listed) console.error(`  ${record.name || record.node_id.slice(0, 8)}  ${directoryRecordUrl(record).split('&tunnel=')[0]}`);
     }
-    target.signalUrl = 'auto';
-    target.signalUrls = ['auto'];
+    if (PEERS > PUBLIC_PEER_LIMIT && !opt['public-load']) {
+      // A stress run: directory relays only, never a cloud relay or a
+      // tunnel (both count against Cloudflare's request limit). A relay on
+      // this machine, else on this network, else all of them round robin.
+      const { networkInterfaces } = await import('node:os');
+      const mine = Object.values(networkInterfaces()).flat().filter((entry) => entry && entry.family === 'IPv4' && !entry.internal).map((entry) => entry.address);
+      const lanHosts = (record) => (record.lan || []).map((endpoint) => endpoint.split(':')[0]);
+      const subnet = (ip) => ip.split('.').slice(0, 3).join('.');
+      const here = listed.filter((record) => lanHosts(record).some((host) => mine.includes(host)));
+      const nearby = listed.filter((record) => lanHosts(record).some((host) => mine.some((ip) => subnet(ip) === subnet(host))));
+      const chosen = here.length ? here : nearby.length ? nearby : listed;
+      const noTunnel = (record) => directoryRecordUrl({ ...record, tunnel: null });
+      target.signalUrls = chosen.map(noTunnel);
+      target.signalUrl = target.signalUrls[0];
+      if (!quiet) console.error(`wurl: stress run: peers use ${here.length ? 'the relay on this machine' : nearby.length ? 'the relay on this network' : 'the listed relays'} only, no cloud relay or tunnel`);
+    } else {
+      target.signalUrl = 'auto';
+      target.signalUrls = ['auto'];
+    }
   } else if (!quiet) {
     console.error(`wurl: no relay in the DNS directory; using ${target.signalUrl}`);
   }
 }
 
-if (PEERS > PUBLIC_PEER_LIMIT && !target.signalUrls.every((url) => url === 'auto' || isLocalRelay(url)) && !opt['public-load']) {
+if (PEERS > PUBLIC_PEER_LIMIT && !target.signalUrls.every((url) => url === 'auto' || url.startsWith('webrtc-direct://') || isLocalRelay(url)) && !opt['public-load']) {
   console.error(`wurl: ${PEERS} peers against the public relay ${target.signalUrl} would count against its daily request limit.`);
   console.error(`  Run them against a local relay instead:  --signal ws://127.0.0.1:8788/ws`);
   console.error(`  (start one with: node scripts/node-relay.mjs in freertc), or add --public-load to do it anyway.`);
