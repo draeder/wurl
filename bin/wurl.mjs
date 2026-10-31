@@ -72,6 +72,8 @@ options:
                          mesh (seconds in one group, most groups, links that went down). Run it on
                          several machines in the same room to soak one mesh across them
       --round <s>        with --soak: seconds between rounds of messages (default 300; 0 for none)
+      --hold             the peers join and stay until Ctrl-C: no messages, no pass or fail, one
+                         status line updating in place. For testing the mesh by hand
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
       --settle <s>       with --messages: how long the formed mesh must hold steady before anyone sends (default 3)
       --webrtc <engine>  with --messages: native (node-datachannel, C++), werift (JavaScript), or auto:
@@ -114,6 +116,7 @@ try {
       silent: { type: 'boolean', short: 's', default: false },
       json: { type: 'boolean', default: false },
       'public-load': { type: 'boolean', default: false },
+      hold: { type: 'boolean', default: false },
       cost: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -123,6 +126,13 @@ try {
   process.exit(2);
 }
 const { values: opt, positionals } = args;
+// --hold: the peers join and stay until Ctrl-C. No messages, no pass or fail;
+// one status line that updates in place. For testing the mesh by hand.
+if (opt.hold) {
+  opt.messages = true;
+  opt.soak = opt.soak ?? String(7 * 24 * 3600); // a week (setTimeout tops out near 24 days)
+  opt.round = '0';
+}
 if (opt.help || positionals.length !== 1) {
   (opt.help ? console.log : console.error)(HELP);
   process.exit(opt.help ? 0 : 2);
@@ -252,9 +262,19 @@ if (opt.messages && opt.soak !== undefined) {
   const { runSoakTest, clock } = await import('../src/soak.js');
   const tp = target.topology;
   const line = (text) => console.log(`* ${text}`);
-  line(`wurl --messages --soak: ${PEERS} PeerPigeon peers on ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}, for ${clock(soakS)}`);
+  // --hold on a terminal: the mesh reports overwrite one line instead of adding lines.
+  const live = opt.hold && process.stdout.isTTY;
+  const report = live
+    ? (text) => process.stdout.write(`\r\x1b[2K* ${text}`.slice(0, Math.max(40, (process.stdout.columns || 160) - 1)))
+    : line;
+  if (opt.hold) {
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { if (live) process.stdout.write('\n'); console.log('* stopped; the peers are leaving'); process.exit(0); });
+  }
+  line(`wurl ${opt.hold ? '--hold' : '--messages --soak'}: ${PEERS} PeerPigeon peers on ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}${opt.hold ? '' : `, for ${clock(soakS)}`}`);
   line(`topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
-  line(`peers join at random times within ${opt['join-window']}s and stay; ${roundS ? `a round of messages every ${roundS}s` : 'no messages'}, a mesh report every minute`);
+  line(opt.hold
+    ? `peers join at random times within ${opt['join-window']}s and stay until Ctrl-C; no messages; the mesh ${process.stdout.isTTY ? 'on one line, updated every minute' : 'reported every minute'}`
+    : `peers join at random times within ${opt['join-window']}s and stay; ${roundS ? `a round of messages every ${roundS}s` : 'no messages'}, a mesh report every minute`);
   const result = await runSoakTest({
     target,
     peers: PEERS,
@@ -264,8 +284,9 @@ if (opt.messages && opt.soak !== undefined) {
     joinWindowS: Math.max(0, Number(opt['join-window'] ?? 20)),
     sendSpreadS: Math.max(0, Number(opt['send-spread'] ?? 10)),
     webrtc: ['native', 'werift', 'auto'].includes(opt.webrtc) ? opt.webrtc : 'auto',
-    onLine: line,
+    onLine: report,
   });
+  if (opt.hold) process.exit(0);
   const pct = (got, want) => (want ? `${((100 * got) / want).toFixed(2)}%` : '-');
   const perfect = result.rounds.filter((r) => r.bGot === r.bWant && r.dGot === r.dWant).length;
   const worst = result.rounds.reduce((low, r) => {
