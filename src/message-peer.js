@@ -15,7 +15,15 @@ const config = JSON.parse(process.env.WURL_PEER);
 const { i, target, joinDelayMs, sendDelaysMs, targetIndex, signalUrl, run, engine } = config;
 const now = () => performance.timeOrigin + performance.now(); // comparable across processes
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-const report = (message) => { try { process.send?.(message); } catch {} };
+// Once wurl itself has gone (Ctrl-C reaches it first), the channel is closed:
+// say nothing more. A send on a closed channel fails later as an 'error' event
+// (EPIPE), not a throw, so the callback is what keeps it from flooding the
+// terminal; the 'disconnect' handler below then leaves the room.
+const report = (message) => {
+  if (!process.connected) return;
+  try { process.send?.(message, () => {}); } catch {}
+};
+process.on('error', () => {});
 const emit = (event) => report({ type: 'event', at: now(), i, ...event });
 
 containWeriftErrors();
