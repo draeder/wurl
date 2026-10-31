@@ -258,6 +258,9 @@ const leave = async () => {
   finishing = true;
   const quit = setTimeout(() => process.exit(0), 2000);
   quit.unref?.();
+  // Write this peer's diagnostics on the way out too (WURL_DIAG): a run that
+  // is stopped is usually the one worth looking at.
+  await writeDiag(linksOf()).catch(() => {});
   await node.destroy().catch(() => {});
   process.exit(0);
 };
