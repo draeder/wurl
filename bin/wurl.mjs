@@ -144,7 +144,26 @@ const CONNECT = Math.max(1, Number.parseInt(opt.connect, 10) || 4);
 const TIME_S = Math.max(1, Number(opt.time) || 20);
 const quiet = opt.silent || opt.json;
 
-if (PEERS > PUBLIC_PEER_LIMIT && !target.signalUrls.every(isLocalRelay) && !opt['public-load']) {
+// With no relay named, --messages peers choose their own, as browsers on the
+// page do: relays in the DNS relay directory first (home relays, reached
+// with no cloud relay in the way). Only when none is listed do they use the
+// relay the URL implies.
+if (target.auto && opt.messages) {
+  const { lookupDirectRelays, directoryRecordUrl } = await import('freertc/client');
+  const listed = await lookupDirectRelays({ network: target.network, room: target.room }).catch(() => []);
+  if (listed.length) {
+    if (!quiet) {
+      console.error(`wurl: relays from the DNS directory (peers choose; each falls back on its own):`);
+      for (const record of listed) console.error(`  ${record.name || record.node_id.slice(0, 8)}  ${directoryRecordUrl(record).split('&tunnel=')[0]}`);
+    }
+    target.signalUrl = 'auto';
+    target.signalUrls = ['auto'];
+  } else if (!quiet) {
+    console.error(`wurl: no relay in the DNS directory; using ${target.signalUrl}`);
+  }
+}
+
+if (PEERS > PUBLIC_PEER_LIMIT && !target.signalUrls.every((url) => url === 'auto' || isLocalRelay(url)) && !opt['public-load']) {
   console.error(`wurl: ${PEERS} peers against the public relay ${target.signalUrl} would count against its daily request limit.`);
   console.error(`  Run them against a local relay instead:  --signal ws://127.0.0.1:8788/ws`);
   console.error(`  (start one with: node scripts/node-relay.mjs in freertc), or add --public-load to do it anyway.`);

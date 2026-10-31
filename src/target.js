@@ -75,6 +75,9 @@ export function resolveTarget(input, overrides = {}) {
   }
   const params = url.searchParams;
   let signalUrl = overrides.signal || first(params, ['signalingServer', 'signalUrl', 'ws', 'relay']);
+  // No relay named: peers that choose their own (PeerPigeon) read the DNS
+  // relay directory first, as a browser on the page does; see bin/wurl.mjs.
+  const auto = !signalUrl || signalUrl === 'auto';
   if (!signalUrl || signalUrl === 'auto') {
     if (url.protocol === 'ws:' || url.protocol === 'wss:') {
       signalUrl = `${url.protocol}//${url.host}${url.pathname.endsWith('/ws') ? url.pathname : '/ws'}`;
@@ -86,6 +89,7 @@ export function resolveTarget(input, overrides = {}) {
     }
   }
   return {
+    auto,
     topology: resolveTopology(params, overrides),
     site: url.toString(),
     signalUrl: signalUrl.split(',')[0].trim(),

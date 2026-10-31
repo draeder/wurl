@@ -85,7 +85,7 @@ async function runPhasedMessageTest({ target, peers: count, timeS = 60, waitS = 
       crypto: false,
       networkId: target.network,
       sessionId: target.room,
-      signalingServer: (target.signalUrls?.length ? target.signalUrls : [target.signalUrl])[i % (target.signalUrls?.length || 1)],
+      ...(((url) => (url === 'auto' ? {} : { signalingServer: url }))((target.signalUrls?.length ? target.signalUrls : [target.signalUrl])[i % (target.signalUrls?.length || 1)])),
       minPeers: minLinks,
       maxPeers: maxLinks,
       tolerantPeers,

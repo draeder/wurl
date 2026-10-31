@@ -1,7 +1,7 @@
-// PeerPigeon 4722519 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 4e3e64e (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
-import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, DEFAULT_DIRECTORY_NAME } from "freertc/client";
+import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, directoryRecordUrl, DEFAULT_DIRECTORY_NAME } from "freertc/client";
 
 // src/freertc-client-adapter.ts
 import { createSignalingClient, withdrawSignalingIdentity } from "freertc/client";
@@ -2940,12 +2940,16 @@ async function chooseRelays(options) {
     return { relay, toRoom: nearest(ids, roomKey), toPeer: nearest(ids, peerKey) };
   }));
   const byRoom = [...placed].sort((a, b) => compareDistance(a.toRoom, b.toRoom, roomKey) || a.relay.url.localeCompare(b.relay.url));
-  const candidates = byRoom.slice(0, Math.max(1, options.candidates ?? RELAY_CANDIDATES));
-  const rest = byRoom.slice(candidates.length).sort((a, b) => compareDistance(a.toPeer, b.toPeer, peerKey) || a.relay.url.localeCompare(b.relay.url));
+  const isDirect = (entry) => entry.relay.url.startsWith("webrtc-direct://");
+  const direct = byRoom.filter(isDirect);
+  const others = byRoom.filter((entry) => !isDirect(entry));
+  const othersTaken = Math.max(1, options.candidates ?? RELAY_CANDIDATES);
+  const candidates = [...direct, ...others.slice(0, othersTaken)];
+  const rest = others.slice(othersTaken).sort((a, b) => compareDistance(a.toPeer, b.toPeer, peerKey) || a.relay.url.localeCompare(b.relay.url));
   const ranked = candidates.map((entry) => {
     const m = measure(entry.relay.nodeId);
     const healthy = isHealthy(entry.relay, m);
-    const tier = healthy && entry.relay.kind === "local" ? 0 : healthy ? 1 : 2;
+    const tier = healthy && isDirect(entry) ? 0 : healthy && entry.relay.kind === "local" ? 1 : healthy ? 2 : 3;
     return { ...entry, tier, score: relayScore(entry.relay, m) };
   }).sort((a, b) => a.tier - b.tier || a.score - b.score || compareDistance(a.toPeer, b.toPeer, peerKey));
   if (options.previousUrl) {
@@ -4705,9 +4709,15 @@ function directRelaySupported() {
 function canonicalDirectRelayUrl(value) {
   const [base, query = ""] = value.split("?");
   if (!isDirectRelayUrl(base)) return null;
-  const tunnel = new URLSearchParams(query).get("tunnel");
+  const params = new URLSearchParams(query);
+  const out = new URLSearchParams();
+  const lan = (params.get("lan") || "").split(",").filter((part) => /^\d{1,3}(\.\d{1,3}){3}:\d{1,5}$/.test(part));
+  if (lan.length) out.set("lan", lan.slice(0, 4).join(","));
+  const tunnel = params.get("tunnel");
   const canonicalTunnel = tunnel ? canonicalSignalingUrl(tunnel) : null;
-  return canonicalTunnel ? `${base}?tunnel=${encodeURIComponent(canonicalTunnel)}` : base;
+  if (canonicalTunnel) out.set("tunnel", canonicalTunnel);
+  const text = out.toString();
+  return text ? `${base}?${text}` : base;
 }
 function canonicalSignalingUrl(value) {
   const text = String(value || "").trim();
@@ -4775,7 +4785,7 @@ async function selectClosestSignalingServer(peerId, relayUrls) {
 }
 async function discoverSignalingRelays(options) {
   const directLookup = options.directory === false || !directRelaySupported() ? Promise.resolve([]) : lookupDirectRelays({ name: options.directory || DEFAULT_DIRECTORY_NAME, fetchImpl: options.fetchImpl }).then((records) => records.map((record) => ({
-    url: canonicalSignalingUrl(record.tunnel ? `${record.direct}?tunnel=${encodeURIComponent(record.tunnel)}` : record.direct),
+    url: canonicalSignalingUrl(directoryRecordUrl(record)),
     nodeId: record.node_id,
     kind: "local",
     connections: 0,
@@ -5475,10 +5485,10 @@ var PartialMesh = class {
         room: this.config.sessionId
       });
       for (const record of records.slice(0, 2)) {
-        const url = canonicalSignalingUrl(record.tunnel ? `${record.direct}?tunnel=${encodeURIComponent(record.tunnel)}` : record.direct);
+        const url = canonicalSignalingUrl(directoryRecordUrl(record));
         if (!url) continue;
         try {
-          const { pc } = await directRelayChannel(record.direct, { timeoutMs: 5e3 });
+          const { pc } = await directRelayChannel(url, { timeoutMs: 5e3 });
           try {
             pc.close();
           } catch {

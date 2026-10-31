@@ -32,7 +32,9 @@ const { PeerPigeonNode } = await import('./vendor/peerpigeon.js');
 
 const { minPeers, maxPeers, tolerantPeers } = target.topology;
 const node = new PeerPigeonNode({
-  crypto: false, networkId: target.network, sessionId: target.room, signalingServer: signalUrl,
+  crypto: false, networkId: target.network, sessionId: target.room,
+  // 'auto': PeerPigeon picks the relay itself (DNS relay directory first).
+  ...(signalUrl === 'auto' ? {} : { signalingServer: signalUrl }),
   minPeers, maxPeers, tolerantPeers,
 });
 const linksOf = () => (node.mesh.getConnectedPeers() || []).map(String);
