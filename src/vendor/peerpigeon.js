@@ -1,4 +1,4 @@
-// PeerPigeon 2577d8c (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 810e9a9 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -710,7 +710,7 @@ var FreeRTCClientAdapter = class {
     this.recoveryProbeTimer = setTimeout(() => {
       this.recoveryProbeTimer = null;
       if (this.intentionallyDisconnected) return;
-      if (typeof document !== "undefined" && document.hidden) return;
+      if (typeof document !== "undefined" && document.hidden && this.client?.isRegistered) return;
       if (this.client?.relayIdle === true) return;
       if (recycleOnTimeout) {
         this.healthProbeMisses += 1;
@@ -755,13 +755,13 @@ var FreeRTCClientAdapter = class {
     if (this.signalingHealthTimer) return;
     this.signalingHealthTimer = setInterval(() => {
       if (this.intentionallyDisconnected || this.recyclingSignalingTransport || this.recoveryProbeTimer) return;
-      if (typeof document !== "undefined" && document.hidden) return;
       if (this.client?.relayIdle === true) return;
       if (!this.client?.isRegistered) {
         this.ensureRegistrationRecoveryProbe("health check");
         this.client?.connect?.();
         return;
       }
+      if (typeof document !== "undefined" && document.hidden) return;
       if (Date.now() - this.lastBootstrapAtMs < this.healthBootstrapWaitMs) return;
       this.emitter.emit("signaling:log", {
         message: "[signal] health check: awaiting relay acknowledgement"
@@ -775,13 +775,13 @@ var FreeRTCClientAdapter = class {
     this.initialSignalingHealthTimer = setTimeout(() => {
       this.initialSignalingHealthTimer = null;
       if (this.intentionallyDisconnected || this.recyclingSignalingTransport || this.recoveryProbeTimer) return;
-      if (typeof document !== "undefined" && document.hidden) return;
       if (this.client?.relayIdle === true) return;
       if (!this.client?.isRegistered) {
         this.ensureRegistrationRecoveryProbe("initial health check");
         this.client?.connect?.();
         return;
       }
+      if (typeof document !== "undefined" && document.hidden) return;
       if (this.connectedPeers.size > 0) return;
       this.emitter.emit("signaling:log", {
         message: "[signal] initial health check: awaiting relay acknowledgement"
