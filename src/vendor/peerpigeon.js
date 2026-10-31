@@ -1,4 +1,9 @@
-// freertc-client-adapter.ts
+// PeerPigeon 29f89c6 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
+// src/index.ts
+import { isDirectRelayUrl, lookupDirectRelays, DEFAULT_DIRECTORY_NAME } from "freertc/client";
+
+// src/freertc-client-adapter.ts
 import { createSignalingClient, withdrawSignalingIdentity } from "freertc/client";
 var RECOVERY_PROBE_TIMEOUT_MS = 12e3;
 var HEALTH_PROBE_MISSES_BEFORE_RECYCLE = 3;
@@ -880,7 +885,7 @@ var FreeRTCClientAdapter = class {
 };
 var freertc_client_adapter_default = FreeRTCClientAdapter;
 
-// sha1.ts
+// src/sha1.ts
 var rotateLeft = (value, bits) => (value << bits | value >>> 32 - bits) >>> 0;
 function sha1Hex(value) {
   const bytes = new TextEncoder().encode(String(value ?? ""));
@@ -945,7 +950,7 @@ function sha1Hex(value) {
   return [h0, h1, h2, h3, h4].map((word) => word.toString(16).padStart(8, "0")).join("");
 }
 
-// gossip.ts
+// src/gossip.ts
 var RELIABLE_REPAIR_TYPE = "pp-gossip-repair-v1";
 var GOSSIP_AGGREGATE_PROTOCOL = "gossip-echo/1";
 var CECR_ID_WIDTH_BITS = 256;
@@ -960,7 +965,7 @@ var DEFAULT_ANTI_ENTROPY_REQUEST_SIZE = 64;
 var MAX_ROUTE_TRACE_PEERS = 32;
 var ROUTE_ACK_BATCH_MS = 150;
 var ROUTE_ACK_MAX_PEERS = 128;
-var GossipProtocol = class _GossipProtocol {
+var _GossipProtocol = class _GossipProtocol {
   constructor(mesh, options = {}) {
     this.messageLog = /* @__PURE__ */ new Map();
     this.maxTrackedMessages = 12e3;
@@ -1307,24 +1312,6 @@ var GossipProtocol = class _GossipProtocol {
     const value = String(peerId ?? "").trim();
     return /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : sha1Hex(value);
   }
-  static {
-    // A repair round per retained message was a summary to every fan-out peer
-    // for every message that arrived: twenty-five a second on a busy link. One
-    // round per half second carries the same information; the two-second sync
-    // loop still runs behind it.
-    this.INITIAL_SPREAD_REPAIR_MIN_INTERVAL_MS = 500;
-  }
-  static {
-    this.MAX_REPLAYS_PER_PEER = 3;
-  }
-  static {
-    // A summary lists only the retained ids a peer has not been told about
-    // since its last full summary; the full list goes at most once per resend
-    // interval. Re-listing every id in flight on every change — a hundred and
-    // eighty ids, twenty kilobytes, three frames, a few times a second per
-    // link on a busy fleet — was the largest flow on every link.
-    this.ANTI_ENTROPY_RESEND_MS = 3e4;
-  }
   scheduleInitialSpreadRepair(_startedAt = Date.now()) {
     if (this.initialSpreadRepairQueued || this.destroyed) return;
     this.initialSpreadRepairQueued = true;
@@ -1463,7 +1450,7 @@ var GossipProtocol = class _GossipProtocol {
       const retained = this.retainedMessages.get(messageId);
       if (!retained) continue;
       if (this.initialSpreadComplete(retained.message) || !this.canContinueInitialSpread(retained.message, fromPeerId)) continue;
-      const replays = retained.replayedTo ??= /* @__PURE__ */ new Map();
+      const replays = retained.replayedTo ?? (retained.replayedTo = /* @__PURE__ */ new Map());
       const replayed = replays.get(fromPeerId) ?? 0;
       if (replayed >= _GossipProtocol.MAX_REPLAYS_PER_PEER) continue;
       replays.set(fromPeerId, replayed + 1);
@@ -2816,8 +2803,21 @@ var GossipProtocol = class _GossipProtocol {
     }
   }
 };
+// A repair round per retained message was a summary to every fan-out peer
+// for every message that arrived: twenty-five a second on a busy link. One
+// round per half second carries the same information; the two-second sync
+// loop still runs behind it.
+_GossipProtocol.INITIAL_SPREAD_REPAIR_MIN_INTERVAL_MS = 500;
+_GossipProtocol.MAX_REPLAYS_PER_PEER = 3;
+// A summary lists only the retained ids a peer has not been told about
+// since its last full summary; the full list goes at most once per resend
+// interval. Re-listing every id in flight on every change — a hundred and
+// eighty ids, twenty kilobytes, three frames, a few times a second per
+// link on a busy fleet — was the largest flow on every link.
+_GossipProtocol.ANTI_ENTROPY_RESEND_MS = 3e4;
+var GossipProtocol = _GossipProtocol;
 
-// relay-choice.ts
+// src/relay-choice.ts
 var RELAY_CANDIDATES = 5;
 var RELAY_VIRTUAL_IDS = 4;
 var RELAY_SWITCH_MARGIN = 0.3;
@@ -3066,7 +3066,7 @@ var RelayScoreBook = class _RelayScoreBook {
   }
 };
 
-// storage.ts
+// src/storage.ts
 var MemoryStorageDriver = class {
   constructor() {
     this.map = /* @__PURE__ */ new Map();
@@ -4228,7 +4228,7 @@ var PeerPigeonStorage = class {
   }
 };
 
-// crypto.ts
+// src/crypto.ts
 import { decryptMessageWithMeta, encryptMessageWithMeta, generateRandomPair } from "unsea";
 var CRYPTO_PUBLIC_INFO_TYPE = "pp-crypto-public-info-v1";
 var CRYPTO_PUBLIC_REQUEST_TYPE = "pp-crypto-public-request-v1";
@@ -4597,7 +4597,7 @@ var PeerPigeonCryptoProtocol = class {
   }
 };
 
-// index.ts
+// src/index.ts
 var MESH_SIGNAL_PAYLOAD_TYPE = "pp-signal-v1";
 function isMeshSignalPayload(value) {
   if (!value || typeof value !== "object") return false;
@@ -4627,9 +4627,18 @@ var NEGOTIATION_OFFER_DEADLINE_MS = 2e4;
 var MEMBERSHIP_BROADCAST_MIN_INTERVAL_MS = 1e3;
 var DISCOVERY_REFRESH_MIN_MS = 2e3;
 var DISCOVERY_REFRESH_MAX_MS = 5 * 6e4;
+function canonicalDirectRelayUrl(value) {
+  const [base, query = ""] = value.split("?");
+  if (!isDirectRelayUrl(base)) return null;
+  const tunnel = new URLSearchParams(query).get("tunnel");
+  const canonicalTunnel = tunnel ? canonicalSignalingUrl(tunnel) : null;
+  return canonicalTunnel ? `${base}?tunnel=${encodeURIComponent(canonicalTunnel)}` : base;
+}
 function canonicalSignalingUrl(value) {
+  const text = String(value || "").trim();
+  if (text.startsWith("webrtc-direct://")) return canonicalDirectRelayUrl(text);
   try {
-    const url = new URL(String(value || "").trim());
+    const url = new URL(text);
     if (url.protocol === "https:") url.protocol = "wss:";
     if (url.protocol === "http:") url.protocol = "ws:";
     if (url.protocol !== "wss:" && url.protocol !== "ws:") return null;
@@ -4690,6 +4699,21 @@ async function selectClosestSignalingServer(peerId, relayUrls) {
   return ranked[0];
 }
 async function discoverSignalingRelays(options) {
+  const directLookup = options.directory === false ? Promise.resolve([]) : lookupDirectRelays({ name: options.directory || DEFAULT_DIRECTORY_NAME, fetchImpl: options.fetchImpl }).then((records) => records.map((record) => ({
+    url: canonicalSignalingUrl(record.tunnel ? `${record.direct}?tunnel=${encodeURIComponent(record.tunnel)}` : record.direct),
+    nodeId: record.node_id,
+    kind: "local",
+    connections: 0,
+    capacity: Number(record.capacity || 0),
+    tunnelOnly: false
+  })).filter((relay) => Boolean(relay.url))).catch(() => []);
+  const fromRegistry = await discoverRegistryRelays(options);
+  const direct = await directLookup;
+  if (direct.length === 0) return fromRegistry;
+  const directIds = new Set(direct.map((relay) => relay.nodeId));
+  return [...direct, ...fromRegistry.filter((relay) => !directIds.has(relay.nodeId))];
+}
+async function discoverRegistryRelays(options) {
   const bootstrap = canonicalSignalingUrl(options.bootstrapServer);
   if (!bootstrap) throw new Error(`Invalid FreeRTC bootstrap URL: ${options.bootstrapServer}`);
   const records = /* @__PURE__ */ new Map([[bootstrap, {}]]);
@@ -4886,6 +4910,7 @@ var PartialMesh = class {
       signalingServer: bootstrapServer,
       signalingServers,
       automaticSignalingServer,
+      relayDirectory: config.relayDirectory ?? DEFAULT_DIRECTORY_NAME,
       networkId: config.networkId ?? config.sessionId ?? "peerpigeon",
       sessionId: config.sessionId ?? "default-session",
       autoDiscover: config.autoDiscover ?? true,
@@ -4955,12 +4980,19 @@ var PartialMesh = class {
     return (peerId ?? "").trim();
   }
   normalizeSignalingUrl(rawUrl) {
+    if (String(rawUrl).trim().startsWith("webrtc-direct://")) {
+      const direct = canonicalSignalingUrl(rawUrl);
+      if (!direct) throw new Error(`Invalid direct relay URL: ${rawUrl}`);
+      return direct;
+    }
     const url = new URL(rawUrl);
     const hostname = url.hostname.toLowerCase();
     const isLocalDevelopmentHost = hostname === "localhost" || hostname === "::1" || hostname.endsWith(".local") || /^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname);
+    const isIpAddress = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.startsWith("[");
+    const keepsPlainWs = isLocalDevelopmentHost || isIpAddress;
     if (url.protocol === "https:") url.protocol = "wss:";
-    if (url.protocol === "http:") url.protocol = isLocalDevelopmentHost ? "ws:" : "wss:";
-    if (url.protocol === "ws:" && !isLocalDevelopmentHost) url.protocol = "wss:";
+    if (url.protocol === "http:") url.protocol = keepsPlainWs ? "ws:" : "wss:";
+    if (url.protocol === "ws:" && !keepsPlainWs) url.protocol = "wss:";
     if (url.protocol !== "ws:" && url.protocol !== "wss:") {
       throw new Error(`Unsupported signaling protocol: ${url.protocol}`);
     }
@@ -5570,7 +5602,8 @@ var PartialMesh = class {
       previousUrl: previousPeerSignalUrls[0] ?? null,
       onRelays: (relays) => {
         for (const relay of relays) relayNodeIds.set(relay.url, relay.nodeId);
-      }
+      },
+      directory: this.config.relayDirectory
     }) : [this.normalizeSignalingUrl(this.config.signalingServer)];
     this.relayNodeIds = relayNodeIds;
     this.rememberBrowserPeerSignalUrls(signalingUrls.slice(0, 1));

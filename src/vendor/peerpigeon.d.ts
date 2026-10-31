@@ -973,6 +973,8 @@ declare function discoverSignalingRelays(options: {
     fallbackServers?: readonly string[];
     fetchImpl?: typeof fetch;
     timeoutMs?: number;
+    /** DNS relay directory to read direct relays from (default _relays.peer.ooo); false for none. */
+    directory?: string | false;
 }): Promise<RelayInfo[]>;
 /**
  * Read the public relay registry from one bootstrap, then order the relays.
@@ -992,6 +994,7 @@ declare function discoverClosestSignalingServers(options: {
     measurements?: (nodeId: string) => RelayMeasurement | null | undefined;
     previousUrl?: string | null;
     onRelays?: (relays: RelayInfo[]) => void;
+    directory?: string | false;
 }): Promise<string[]>;
 declare function discoverClosestSignalingServer(options: {
     bootstrapServer: string;
@@ -1021,6 +1024,12 @@ interface PartialMeshConfig {
     signalingServers?: readonly string[];
     /** Resolve one relay closest to the peer ID before opening signaling. */
     automaticSignalingServer?: boolean;
+    /**
+     * DNS relay directory to look direct relays up in (one DNS-over-HTTPS
+     * lookup), with automaticSignalingServer. Default _relays.peer.ooo; false to
+     * use only the bootstrap's registry.
+     */
+    relayDirectory?: string | false;
     /**
      * FreeRTC network/application namespace. Peers must match both networkId and
      * sessionId (room) even when they use different federated relay domains.
@@ -1421,13 +1430,29 @@ declare class PartialMesh {
     private sendMembership;
     private membershipBroadcastAtMs;
     private membershipBroadcastTimer;
+    private renewalForwardIds;
+    private renewalForwardTimer;
+    private forwardMembershipRecords;
     private broadcastMembership;
     private tryParseMembership;
     private mergeMembership;
     /**
-     * Disconnect from all peers and close signaling connection
+     * Tell our neighbours we are leaving: a CECR 'left' record for ourselves,
+     * which each of them merges and forwards. Without it the network keeps us
+     * as a member until our lease runs out (up to membershipLeaseMs): peers
+     * keep us as a ring neighbour, keep dialling us, and keep counting the
+     * links our last report listed. A peer that dies without saying goodbye
+     * still ages out by its lease. Returns whether anyone was told.
      */
-    destroy(): void;
+    announceLeave(): boolean;
+    /**
+     * Disconnect from all peers and close signaling connection. Neighbours are
+     * told we are leaving first (see announceLeave), and the links close
+     * LEAVE_FLUSH_MS later so that frame is not dropped with them. Returns how
+     * long the links stay open (0 when nobody was told); a caller about to end
+     * the process should wait that long.
+     */
+    destroy(): number;
 }
 type PeerPigeonNodeStorageOptions = Omit<StorageOptions, 'gossip' | 'peerId' | 'userId'> & {
     userId?: string;
@@ -1516,4 +1541,5 @@ declare class PeerPigeonNode {
     private emit;
 }
 
-export { type CecrConfigSnapshot, type CecrMembershipRecordSnapshot, type CecrOverlaySnapshot, type CecrStateSnapshot, DEFAULT_CLOSE_SIGNALING_RELAY_COUNT, DEFAULT_SIGNALING_SERVERS, type EncryptedBroadcastPayload, type EncryptedDirectPayload, type GossipAggregateDeliveryStatus, type GossipBroadcastOptions, type GossipDeliveryStatus, type GossipMessage, GossipProtocol, type GossipProtocolOptions, type GossipStats, MESH_SIGNAL_PAYLOAD_TYPE, NEGOTIATION_ACTIVE_ICE_DEADLINE_MS, NEGOTIATION_DEAD_TRANSPORT_DEADLINE_MS, NEGOTIATION_OFFER_DEADLINE_MS, PartialMesh, type PartialMeshConfig, type PartialMeshEvents, type PartialMeshRuntimeConfig, type PeerCapacityAdvertisement, type PeerCapacitySnapshot, type PeerConnection, type PeerGraphEdge, type PeerGraphNode, type PeerGraphSnapshot, type PeerPigeonCryptoEvents, type PeerPigeonCryptoOptions, PeerPigeonCryptoProtocol, type PeerPigeonKeyPair, PeerPigeonNode, type PeerPigeonNodeEvents, type PeerPigeonNodeMessage, type PeerPigeonNodeOptions, type PeerPigeonNodeStorageOptions, PeerPigeonStorage, type PeerPublicKey, RELAY_CANDIDATES, RELAY_SCORE_STORAGE_KEY, RELAY_SWITCH_MARGIN, RELAY_VIRTUAL_IDS, type RelayInfo, type RelayKind, type RelayMeasurement, RelayScoreBook, type RoomCipher, type SharedRelayScore, type SignalingRelayCandidate, type StorageChangeOrigin, type StorageEvents, type StorageOptions, type StoragePutOptions, type StorageRecord, type StorageRetrieveOptions, type StorageSpace, type StorageSyncFilterContext, type StorageSyncOptions, type StorageUnsubscribe, chooseRelays, PartialMesh as default, discoverClosestSignalingServer, discoverClosestSignalingServers, discoverSignalingRelays, isHealthy, isMeshSignalPayload, rankSignalingServersByDistance, relayScore, roomRoutingKey, selectClosestSignalingServer, sha1Hex };
+export { DEFAULT_CLOSE_SIGNALING_RELAY_COUNT, DEFAULT_SIGNALING_SERVERS, GossipProtocol, MESH_SIGNAL_PAYLOAD_TYPE, NEGOTIATION_ACTIVE_ICE_DEADLINE_MS, NEGOTIATION_DEAD_TRANSPORT_DEADLINE_MS, NEGOTIATION_OFFER_DEADLINE_MS, PartialMesh, PeerPigeonCryptoProtocol, PeerPigeonNode, PeerPigeonStorage, RELAY_CANDIDATES, RELAY_SCORE_STORAGE_KEY, RELAY_SWITCH_MARGIN, RELAY_VIRTUAL_IDS, RelayScoreBook, chooseRelays, PartialMesh as default, discoverClosestSignalingServer, discoverClosestSignalingServers, discoverSignalingRelays, isHealthy, isMeshSignalPayload, rankSignalingServersByDistance, relayScore, roomRoutingKey, selectClosestSignalingServer, sha1Hex };
+export type { CecrConfigSnapshot, CecrMembershipRecordSnapshot, CecrOverlaySnapshot, CecrStateSnapshot, EncryptedBroadcastPayload, EncryptedDirectPayload, GossipAggregateDeliveryStatus, GossipBroadcastOptions, GossipDeliveryStatus, GossipMessage, GossipProtocolOptions, GossipStats, PartialMeshConfig, PartialMeshEvents, PartialMeshRuntimeConfig, PeerCapacityAdvertisement, PeerCapacitySnapshot, PeerConnection, PeerGraphEdge, PeerGraphNode, PeerGraphSnapshot, PeerPigeonCryptoEvents, PeerPigeonCryptoOptions, PeerPigeonKeyPair, PeerPigeonNodeEvents, PeerPigeonNodeMessage, PeerPigeonNodeOptions, PeerPigeonNodeStorageOptions, PeerPublicKey, RelayInfo, RelayKind, RelayMeasurement, RoomCipher, SharedRelayScore, SignalingRelayCandidate, StorageChangeOrigin, StorageEvents, StorageOptions, StoragePutOptions, StorageRecord, StorageRetrieveOptions, StorageSpace, StorageSyncFilterContext, StorageSyncOptions, StorageUnsubscribe };
