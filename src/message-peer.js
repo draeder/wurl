@@ -85,6 +85,14 @@ if (DIAG_DIR) {
   }, 200);
   watch.unref?.();
 }
+// The last relay/signaling lines, for the diagnostic file.
+const signalLog = [];
+node.mesh?.on?.('signaling:log', (event) => {
+  const text = String(event?.message ?? '');
+  if (!/\[signal\]|\[relay\]/.test(text)) return;
+  signalLog.push(`${new Date().toISOString().slice(11, 19)} ${text.slice(0, 200)}`);
+  if (signalLog.length > 60) signalLog.shift();
+});
 const writeDiag = async (links) => {
   if (!DIAG_DIR) return;
   try {
@@ -102,8 +110,9 @@ const writeDiag = async (links) => {
       relayListed: m.activeSignalingPeers?.size ?? null,
       foreignListed: [...(m.activeSignalingPeers ?? [])].filter((peerId) => !m.globalPeers?.has(peerId)).map(short),
       pending: m.getPendingPeerCount?.() ?? null,
-      relay: { connected: m.signalingClient?.isConnected?.() ?? null, idle: m.signalingClient?.client?.relayIdle ?? null },
+      relay: { connected: m.signalingClient?.isConnected?.() ?? null, idle: m.signalingClient?.client?.relayIdle ?? null, registered: m.signalingClient?.client?.isRegistered ?? null, url: m.signalingClient?.currentSignalUrl ?? null },
       linkDowns,
+      signalLog,
     }));
   } catch (error) {
     console.error('wurl diag:', error?.message ?? error);

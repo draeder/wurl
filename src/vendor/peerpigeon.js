@@ -1,4 +1,4 @@
-// PeerPigeon 810e9a9 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon f7a30dc (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -798,6 +798,10 @@ var FreeRTCClientAdapter = class {
   }
   recycleStaleSignalingTransport(reason) {
     if (this.intentionallyDisconnected || this.recyclingSignalingTransport || !this.client) return;
+    if (this.client.signalingOpening === true) {
+      this.emitter.emit("signaling:log", { message: `[signal] ${reason}: relay connection still opening; waiting for it` });
+      return;
+    }
     this.recyclingSignalingTransport = true;
     this.signalingConnected = false;
     this.clearRecoveryProbeTimer();
