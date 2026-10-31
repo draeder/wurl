@@ -71,7 +71,7 @@ options:
                          direct message, and wurl reports how many arrived; once a minute it reports the
                          mesh (seconds in one group, most groups, links that went down). Run it on
                          several machines in the same room to soak one mesh across them
-      --round <s>        with --soak: seconds between rounds of messages (default 300)
+      --round <s>        with --soak: seconds between rounds of messages (default 300; 0 for none)
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
       --settle <s>       with --messages: how long the formed mesh must hold steady before anyone sends (default 3)
       --webrtc <engine>  with --messages: native (node-datachannel, C++), werift (JavaScript), or auto:
@@ -247,13 +247,14 @@ if (opt.messages && opt.soak !== undefined) {
     console.error('wurl: --soak takes the number of seconds to run, at least 60 (28800 is 8 hours)');
     process.exit(2);
   }
-  const roundS = Math.max(30, Number(opt.round) || 300);
+  // --round 0: no messages at all, only the mesh report (for watching the mesh by hand).
+  const roundS = opt.round === '0' ? 0 : Math.max(30, Number(opt.round) || 300);
   const { runSoakTest, clock } = await import('../src/soak.js');
   const tp = target.topology;
   const line = (text) => console.log(`* ${text}`);
   line(`wurl --messages --soak: ${PEERS} PeerPigeon peers on ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}, for ${clock(soakS)}`);
   line(`topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
-  line(`peers join at random times within ${opt['join-window']}s and stay; a round of messages every ${roundS}s, a mesh report every minute`);
+  line(`peers join at random times within ${opt['join-window']}s and stay; ${roundS ? `a round of messages every ${roundS}s` : 'no messages'}, a mesh report every minute`);
   const result = await runSoakTest({
     target,
     peers: PEERS,

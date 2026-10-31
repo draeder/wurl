@@ -190,7 +190,7 @@ export async function runSoakTest({
       // The first round once everyone has joined and had time to link up,
       // whether or not the mesh is one group: a split mesh is what a round
       // should show.
-      if (nextRoundAt === null && (firstFormedAt !== null || t >= joinWindowS + 60)) nextRoundAt = t + 5;
+      if (roundS > 0 && nextRoundAt === null && (firstFormedAt !== null || t >= joinWindowS + 60)) nextRoundAt = t + 5;
       if (nextRoundAt !== null && t >= nextRoundAt && t + countForS < soakS) {
         const round = rounds.length;
         const peersNow = ids.map((id, j) => (id && !exited.has(j) ? j : -1)).filter((j) => j >= 0);
