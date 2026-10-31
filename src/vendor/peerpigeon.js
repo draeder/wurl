@@ -1,4 +1,4 @@
-// PeerPigeon 383a405 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 2577d8c (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -262,6 +262,13 @@ var FreeRTCClientAdapter = class {
       onNegotiationFailure: (data) => {
         if (!isCurrentClient()) return;
         this.handleNegotiationFailure(data);
+      },
+      // A relay says no relay has this peer: it has left.
+      onPeerGone: (data) => {
+        if (!isCurrentClient()) return;
+        const peerId = this.normalizePeerId(data?.peerId);
+        if (!peerId || this.isSelfAlias(peerId)) return;
+        this.emitter.emit("peer:gone", { peerId });
       },
       onStatusChange: (status) => {
         if (!isCurrentClient()) return;
@@ -4642,6 +4649,7 @@ function isMeshSignalPayload(value) {
   return candidate.__ppType === MESH_SIGNAL_PAYLOAD_TYPE && !!candidate.envelope && typeof candidate.envelope === "object";
 }
 var LOCAL_RELAY_CHECK_MS = 6e4;
+var PEER_GONE_BACKOFF_MS = 6e4;
 var FILL_REFUSED_WINDOW_MS = 6e4;
 var FILL_BACKOFF_MIN_MS = 15e3;
 var FILL_BACKOFF_MAX_MS = 12e4;
@@ -5897,6 +5905,16 @@ var PartialMesh = class {
       if (!peerId || this.isSelfAlias(peerId)) return;
       this.noteDialFailure(peerId);
       this.activeSignalingPeers.delete(peerId);
+    });
+    this.signalingClient.on("peer:gone", (data) => {
+      const peerId = this.normalizePeerId(data?.peerId);
+      if (!peerId || this.isSelfAlias(peerId) || this.peers.get(peerId)?.connected) return;
+      this.activeSignalingPeers.delete(peerId);
+      this.discoveredPeers.delete(peerId);
+      this.connecting.delete(peerId);
+      if (this.peers.has(peerId)) this.peers.delete(peerId);
+      this.dialBackoffUntilMs.set(peerId, Date.now() + PEER_GONE_BACKOFF_MS);
+      this.emit("signaling:log", { message: `[signal] ${peerId.slice(0, 12)} is on no relay: no longer dialling it` });
     });
     this.signalingClient.on("rtc:data", (data) => {
       const msg = this.tryParseMembership(data.data);
