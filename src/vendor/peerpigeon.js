@@ -1,4 +1,4 @@
-// PeerPigeon 5409335 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon fed2333 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, directoryRecordUrl, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -2940,7 +2940,7 @@ async function chooseRelays(options) {
     return { relay, toRoom: nearest(ids, roomKey), toPeer: nearest(ids, peerKey) };
   }));
   const byRoom = [...placed].sort((a, b) => compareDistance(a.toRoom, b.toRoom, roomKey) || a.relay.url.localeCompare(b.relay.url));
-  const isDirect = (entry) => entry.relay.url.startsWith("webrtc-direct://");
+  const isDirect = (entry) => entry.relay.url.startsWith("webrtc-direct://") || entry.relay.url.startsWith("ws://127.0.0.1:");
   const direct = byRoom.filter(isDirect);
   const others = byRoom.filter((entry) => !isDirect(entry));
   const othersTaken = Math.max(1, options.candidates ?? RELAY_CANDIDATES);
@@ -2949,7 +2949,8 @@ async function chooseRelays(options) {
   const ranked = candidates.map((entry) => {
     const m = measure(entry.relay.nodeId);
     const healthy = isHealthy(entry.relay, m);
-    const tier = healthy && isDirect(entry) ? 0 : healthy && entry.relay.kind === "local" ? 1 : healthy ? 2 : 3;
+    const local = entry.relay.kind === "local";
+    const tier = isDirect(entry) ? healthy ? 0 : 1 : local ? healthy ? 2 : 4 : healthy ? 3 : 5;
     return { ...entry, tier, score: relayScore(entry.relay, m) };
   }).sort((a, b) => a.tier - b.tier || a.score - b.score || compareDistance(a.toPeer, b.toPeer, peerKey));
   if (options.previousUrl) {
@@ -4744,10 +4745,7 @@ var LINK_LOG_MAX = 200;
 var NEEDY_UNREPORTED_MS = 15e3;
 function directRelaySupported() {
   if (typeof navigator === "undefined" || typeof navigator.userAgent !== "string") return true;
-  const ua = navigator.userAgent;
-  if (/Firefox\//.test(ua)) return false;
-  if (/Safari\//.test(ua) && !/(Chrome|Chromium|CriOS|Edg)\//.test(ua)) return false;
-  return true;
+  return !/Firefox\//.test(navigator.userAgent);
 }
 function canonicalDirectRelayUrl(value) {
   const [base, query = ""] = value.split("?");
@@ -4835,11 +4833,51 @@ async function discoverSignalingRelays(options) {
     capacity: Number(record.capacity || 0),
     tunnelOnly: false
   })).filter((relay) => Boolean(relay.url))).catch(() => []);
+  const onThisMachine = typeof globalThis.location !== "undefined" && !directRelaySupported() ? findRelayOnThisMachine(options.fetchImpl) : Promise.resolve(null);
   const fromRegistry = (await discoverRegistryRelays(options)).filter((relay) => reachableFromThisPage(relay.url));
+  const mine = await onThisMachine;
+  if (mine) fromRegistry.unshift(mine);
   const direct = await directLookup;
   if (direct.length === 0) return fromRegistry;
   const directIds = new Set(direct.map((relay) => relay.nodeId));
   return [...direct, ...fromRegistry.filter((relay) => !directIds.has(relay.nodeId))];
+}
+async function findRelayOnThisMachine(_fetchImpl) {
+  const url = "ws://127.0.0.1:8788/ws";
+  const WS = globalThis.WebSocket;
+  if (typeof WS !== "function") return null;
+  const open = await new Promise((resolve) => {
+    let socket = null;
+    const timer = setTimeout(() => {
+      try {
+        socket?.close();
+      } catch {
+      }
+      resolve(false);
+    }, 1500);
+    try {
+      socket = new WS(`${url}?probe=1`);
+      socket.onopen = () => {
+        clearTimeout(timer);
+        try {
+          socket?.close(1e3, "probe");
+        } catch {
+        }
+        resolve(true);
+      };
+      socket.onerror = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+    } catch {
+      clearTimeout(timer);
+      resolve(false);
+    }
+  });
+  if (!open) return null;
+  const ranking = await relayRankingId(url, null);
+  const nodeId = Array.from(ranking, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return { url, nodeId, kind: "local", connections: 0, capacity: 0, tunnelOnly: false };
 }
 function reachableFromThisPage(url) {
   const page = globalThis.location;
@@ -4914,7 +4952,11 @@ async function discoverClosestSignalingServers(options) {
       measurements: options.measurements,
       previousUrl: options.previousUrl ? canonicalSignalingUrl(options.previousUrl) : null
     });
-    return ordered.slice(0, limit);
+    const chosen = ordered.slice(0, limit);
+    for (const url of ordered) {
+      if ((url.startsWith("webrtc-direct://") || url.startsWith("ws://127.0.0.1:")) && !chosen.includes(url)) chosen.push(url);
+    }
+    return chosen;
   }
   const bootstrap = canonicalSignalingUrl(options.bootstrapServer);
   if (!bootstrap) throw new Error(`Invalid FreeRTC bootstrap URL: ${options.bootstrapServer}`);
