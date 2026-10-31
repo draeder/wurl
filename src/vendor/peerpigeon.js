@@ -1,4 +1,4 @@
-// PeerPigeon c874c2d (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 4722519 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -15,7 +15,7 @@ var INITIAL_SIGNALING_HEALTH_DELAY_MS = 1e3;
 var SIGNALING_HEALTH_INTERVAL_MS = 15e3;
 var SIGNALING_HEALTH_MAX_INTERVAL_MS = 5 * 6e4;
 var DISCOVERY_ABSENCE_GRACE_MS = 3e4;
-var DISCOVERY_ACTIVE_MAX_AGE_MS = 18e3;
+var DISCOVERY_ACTIVE_MAX_AGE_MS = 35e3;
 function generateMessageId(bytesLength = 8) {
   const bytes = new Uint8Array(bytesLength);
   const webCrypto = globalThis.window?.crypto ?? globalThis.crypto;
@@ -508,11 +508,12 @@ var FreeRTCClientAdapter = class {
     const now = Date.now();
     const normalizedCandidates = (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
       peerId: this.normalizePeerId(candidate?.peerId),
-      advertisedAt: Number(candidate?.advertisedAt)
+      advertisedAt: Number(candidate?.advertisedAt),
+      listedAt: Number(candidate?.listedAt)
     })).filter(({ peerId }) => peerId && !this.isSelfAlias(peerId));
     const snapshotPeers = new Set(normalizedCandidates.map(({ peerId }) => peerId));
     const activeSnapshotPeers = /* @__PURE__ */ new Set();
-    for (const { peerId, advertisedAt } of normalizedCandidates) {
+    for (const { peerId, advertisedAt, listedAt } of normalizedCandidates) {
       this.knownPeerLastSeenAtMs.set(peerId, now);
       if (Number.isFinite(advertisedAt)) {
         const previous = this.knownPeerAdvertisedAtMs.get(peerId) ?? Number.NEGATIVE_INFINITY;
@@ -520,7 +521,8 @@ var FreeRTCClientAdapter = class {
       }
       const failedAdvertisementAt = this.failedPeerAdvertisementAtMs.get(peerId);
       const hasNewAdvertisement = failedAdvertisementAt == null || Number.isFinite(advertisedAt) && advertisedAt > failedAdvertisementAt;
-      const isFresh = !Number.isFinite(advertisedAt) || now - advertisedAt <= DISCOVERY_ACTIVE_MAX_AGE_MS;
+      const age = Number.isFinite(listedAt) ? listedAt - advertisedAt : now - advertisedAt;
+      const isFresh = !Number.isFinite(advertisedAt) || age <= DISCOVERY_ACTIVE_MAX_AGE_MS;
       if (hasNewAdvertisement && isFresh) {
         activeSnapshotPeers.add(peerId);
         if (failedAdvertisementAt != null) this.failedPeerAdvertisementAtMs.delete(peerId);
