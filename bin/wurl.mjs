@@ -166,11 +166,23 @@ if (target.auto && opt.messages) {
       const subnet = (ip) => ip.split('.').slice(0, 3).join('.');
       const here = listed.filter((record) => lanHosts(record).some((host) => mine.includes(host)));
       const nearby = listed.filter((record) => lanHosts(record).some((host) => mine.some((ip) => subnet(ip) === subnet(host))));
-      const chosen = here.length ? here : nearby.length ? nearby : listed;
+      // A relay on this machine that is not in the directory (behind NAT with
+      // no open port) still serves this machine's peers for free, as long as
+      // it reaches the others through a home relay rather than the cloud.
+      const local = here.length ? null : await fetch('http://127.0.0.1:8788/health', { signal: AbortSignal.timeout(2_000) })
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const localUrl = String(local?.relay_url || '');
+      const localFree = /^ws:\/\//.test(localUrl) && !/^ws:\/\/(127\.|localhost|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(localUrl);
+      if (local && !localFree && !quiet) console.error(`wurl: the relay on this machine is ${localUrl.startsWith('wss:') ? `federated through a cloud tunnel (${localUrl})` : `not federated yet (${localUrl})`}; not using it`);
       const noTunnel = (record) => directoryRecordUrl({ ...record, tunnel: null });
-      target.signalUrls = chosen.map(noTunnel);
+      if (localFree) {
+        target.signalUrls = ['ws://127.0.0.1:8788/ws'];
+      } else {
+        const chosen = here.length ? here : nearby.length ? nearby : listed;
+        target.signalUrls = chosen.map(noTunnel);
+      }
       target.signalUrl = target.signalUrls[0];
-      if (!quiet) console.error(`wurl: stress run: peers use ${here.length ? 'the relay on this machine' : nearby.length ? 'the relay on this network' : 'the listed relays'} only, no cloud relay or tunnel`);
+      if (!quiet) console.error(`wurl: stress run: peers use ${localFree ? `the relay on this machine (federated as ${localUrl})` : here.length ? 'the relay on this machine' : nearby.length ? 'the relay on this network' : 'the listed relays'} only, no cloud relay or tunnel`);
     } else {
       target.signalUrl = 'auto';
       target.signalUrls = ['auto'];
