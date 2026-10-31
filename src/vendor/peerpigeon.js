@@ -1,4 +1,4 @@
-// PeerPigeon 4e3e64e (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 5409335 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, directoryRecordUrl, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -3218,7 +3218,11 @@ var IndexedDbStorageDriver = class _IndexedDbStorageDriver {
     });
   }
 };
-var RETRIEVE_ANSWER_MIN_INTERVAL_MS = 1e4;
+var RETRIEVE_ANSWER_MIN_INTERVAL_MS = 1e3;
+var RETRIEVE_RETRY_ANSWER_MIN_INTERVAL_MS = 250;
+var RETRIEVE_RETRY_MS = 1200;
+var RETRIEVE_FIRST_WAIT_MS = 1500;
+var RETRIEVE_MIN_WAIT_MS = 600;
 var DIGEST_MAX_ENTRIES = 4e3;
 var DIGEST_MAX_PUSHES = 1e3;
 var PeerPigeonStorage = class {
@@ -3229,6 +3233,8 @@ var PeerPigeonStorage = class {
     this.subscribedKeys = /* @__PURE__ */ new Set();
     this.subscribedEntries = /* @__PURE__ */ new Map();
     this.retrieveAnsweredAt = /* @__PURE__ */ new Map();
+    // How long recent Gets took to be answered (ms), newest last.
+    this.retrieveAnswerTimes = [];
     this.pendingRetrieveRequests = /* @__PURE__ */ new Map();
     this.closed = false;
     this.instanceId = `storage-${Math.random().toString(36).slice(2, 11)}`;
@@ -3375,19 +3381,52 @@ var PeerPigeonStorage = class {
       timestamp: Date.now(),
       ...this.peerId ? { origin: this.peerId } : {}
     };
-    const timeoutMs = Math.max(100, Math.floor(Number(options.timeoutMs ?? 2e3)));
+    const fullTimeoutMs = Math.max(100, Math.floor(Number(options.timeoutMs ?? 2e3)));
+    if (existing) {
+      void this.broadcastSyncPayload(request).catch(() => {
+      });
+      return existing;
+    }
+    const timeoutMs = Math.min(fullTimeoutMs, this.expectedAnswerMs());
+    const askedAt = Date.now();
     return await new Promise(async (resolve) => {
       const timeout = setTimeout(async () => {
         this.pendingRetrieveRequests.delete(reqId);
         const latest = await this.get(space, normalizedKey);
-        resolve(latest);
+        done(latest);
       }, timeoutMs);
+      let retry = null;
+      const done = (value) => {
+        if (retry) clearInterval(retry);
+        resolve(value);
+      };
       this.pendingRetrieveRequests.set(reqId, {
-        resolve: (value) => resolve(value),
+        resolve: (value) => {
+          if (value) this.noteAnswerTime(Date.now() - askedAt);
+          done(value);
+        },
         timeout
       });
       await this.broadcastSyncPayload(request);
+      retry = setInterval(() => {
+        if (!this.pendingRetrieveRequests.has(reqId)) {
+          if (retry) clearInterval(retry);
+          return;
+        }
+        void this.broadcastSyncPayload({ ...request, timestamp: Date.now(), retry: true }).catch(() => {
+        });
+      }, Math.min(RETRIEVE_RETRY_MS, Math.max(300, Math.floor(timeoutMs / 2))));
+      retry.unref?.();
     });
+  }
+  /** How long to wait for a Get's answer: twice the slowest recent answer, within bounds. */
+  expectedAnswerMs() {
+    if (this.retrieveAnswerTimes.length < 3) return RETRIEVE_FIRST_WAIT_MS;
+    return Math.max(RETRIEVE_MIN_WAIT_MS, 2 * Math.max(...this.retrieveAnswerTimes));
+  }
+  noteAnswerTime(ms) {
+    this.retrieveAnswerTimes.push(ms);
+    if (this.retrieveAnswerTimes.length > 8) this.retrieveAnswerTimes.shift();
   }
   async delete(space, key) {
     const mutation = await this.applyLocalDelete(space, key, false);
@@ -3833,9 +3872,11 @@ var PeerPigeonStorage = class {
       timestamp: Date.now(),
       record: existing
     };
-    const answerKey = `${request.origin ?? request.actorId}:${request.space}:${request.key}`;
+    const asker = `${request.origin ?? request.actorId}:${request.space}:${request.key}`;
+    const answerKey = request.retry ? `${asker}:${request.reqId}` : asker;
+    const minInterval = request.retry ? RETRIEVE_RETRY_ANSWER_MIN_INTERVAL_MS : RETRIEVE_ANSWER_MIN_INTERVAL_MS;
     const answeredAt = this.retrieveAnsweredAt.get(answerKey) ?? 0;
-    if (Date.now() - answeredAt < RETRIEVE_ANSWER_MIN_INTERVAL_MS) return;
+    if (Date.now() - answeredAt < minInterval) return;
     this.retrieveAnsweredAt.set(answerKey, Date.now());
     if (this.retrieveAnsweredAt.size > 2048) {
       for (const [key, at] of this.retrieveAnsweredAt) {
@@ -4699,6 +4740,8 @@ var NEGOTIATION_OFFER_DEADLINE_MS = 2e4;
 var MEMBERSHIP_BROADCAST_MIN_INTERVAL_MS = 1e3;
 var DISCOVERY_REFRESH_MIN_MS = 2e3;
 var DISCOVERY_REFRESH_MAX_MS = 5 * 6e4;
+var LINK_LOG_MAX = 200;
+var NEEDY_UNREPORTED_MS = 15e3;
 function directRelaySupported() {
   if (typeof navigator === "undefined" || typeof navigator.userAgent !== "string") return true;
   const ua = navigator.userAgent;
@@ -4792,11 +4835,21 @@ async function discoverSignalingRelays(options) {
     capacity: Number(record.capacity || 0),
     tunnelOnly: false
   })).filter((relay) => Boolean(relay.url))).catch(() => []);
-  const fromRegistry = await discoverRegistryRelays(options);
+  const fromRegistry = (await discoverRegistryRelays(options)).filter((relay) => reachableFromThisPage(relay.url));
   const direct = await directLookup;
   if (direct.length === 0) return fromRegistry;
   const directIds = new Set(direct.map((relay) => relay.nodeId));
   return [...direct, ...fromRegistry.filter((relay) => !directIds.has(relay.nodeId))];
+}
+function reachableFromThisPage(url) {
+  const page = globalThis.location;
+  if (page?.protocol !== "https:" || !String(url).startsWith("ws://")) return true;
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\./.test(host);
+  } catch {
+    return false;
+  }
 }
 async function discoverRegistryRelays(options) {
   const bootstrap = canonicalSignalingUrl(options.bootstrapServer);
@@ -4889,7 +4942,7 @@ async function discoverClosestSignalingServers(options) {
       const body = await response.json();
       for (const record of Array.isArray(body?.relays) ? body.relays : []) {
         const normalized = canonicalSignalingUrl(typeof record === "string" ? record : String(record?.url || ""));
-        if (!normalized) continue;
+        if (!normalized || !reachableFromThisPage(normalized)) continue;
         const nodeId = typeof record === "string" ? null : record?.node_id ?? null;
         if (!candidates.has(normalized) || nodeId && !candidates.get(normalized)) candidates.set(normalized, nodeId);
       }
@@ -4927,6 +4980,9 @@ var PartialMesh = class {
     /** First local observation of FreeRTC negotiations not tracked by PartialMesh. */
     this.orphanRtcFirstSeenAtMs = /* @__PURE__ */ new Map();
     this.peerConnectedAtMs = /* @__PURE__ */ new Map();
+    // Every link that opened or closed, with why it closed: the last
+    // LINK_LOG_MAX, newest last. See getLinkLog().
+    this.linkLog = [];
     this.discoveredAtMs = /* @__PURE__ */ new Map();
     /** Peers present in the relay's latest un-graced discovery snapshot. */
     this.activeSignalingPeers = /* @__PURE__ */ new Set();
@@ -5537,8 +5593,19 @@ var PartialMesh = class {
       spare: (() => {
         const capacity = this.freshPeerCapacity(peerId);
         return capacity ? Math.max(0, capacity.connectedPeers - this.config.minPeers) : 0;
+      })(),
+      // A neighbour that would be left at or below its minimum: it reported
+      // minPeers links or fewer (this one included), or it connected just
+      // now and has not said (a peer dialling in from none). Shedding it
+      // sent it dialling the next full peer, which shed it too; a browser
+      // tab bled out to no links that way, one fresh link at a time.
+      needy: (() => {
+        const capacity = this.freshPeerCapacity(peerId);
+        if (capacity) return capacity.connectedPeers <= this.config.minPeers;
+        return now - (this.peerConnectedAtMs.get(peerId) ?? 0) < NEEDY_UNREPORTED_MS;
       })()
     })).sort((a, b) => {
+      if (a.needy !== b.needy) return a.needy ? 1 : -1;
       if (a.coordinate !== b.coordinate) return a.coordinate ? 1 : -1;
       if (a.graphBridge !== b.graphBridge) return a.graphBridge ? 1 : -1;
       if (a.cecrProtected !== b.cecrProtected) return a.cecrProtected ? 1 : -1;
@@ -5904,6 +5971,7 @@ var PartialMesh = class {
         this.bridgeGraceUntilMs.set(peerId, Date.now() + BRIDGE_GRACE_MS);
       }
       this.noteLocalCapacityChanged();
+      this.noteLink(peerId, "up", "local", "connected");
       this.emit("peer:connected", peerId);
       const rebalanceDropPeerId = this.pendingRebalanceDropByTarget.get(peerId);
       if (rebalanceDropPeerId) {
@@ -5948,6 +6016,7 @@ var PartialMesh = class {
           this.fillBackoffUntilMs = Date.now() + this.fillBackoffMs;
         }
         if (wasConnected) {
+          this.noteLink(peerId, "down", "remote", data.reason || "unknown");
           this.noteTransportDisconnect(peerId, connectedAt, data.reason);
           this.noteLocalCapacityChanged();
           this.emit("peer:disconnected", peerId);
@@ -6266,6 +6335,14 @@ var PartialMesh = class {
       this.dialFailureCount.delete(peerId);
     }
   }
+  noteLink(peerId, event, by, reason) {
+    this.linkLog.push({ at: Date.now(), peer: peerId, event, by, reason, links: this.getConnectedPeers().length });
+    if (this.linkLog.length > LINK_LOG_MAX) this.linkLog.splice(0, this.linkLog.length - LINK_LOG_MAX);
+  }
+  /** The last links that opened or closed, newest last: when, which peer, and why it closed. */
+  getLinkLog() {
+    return this.linkLog.map((entry) => ({ ...entry }));
+  }
   noteTransportDisconnect(peerId, connectedAt, reason) {
     if (reason === "local_close" || reason === "capacity_shed") return;
     const connectedForMs = connectedAt > 0 ? Date.now() - connectedAt : 0;
@@ -6539,6 +6616,7 @@ var PartialMesh = class {
         this.discoveredPeers.delete(peerId);
       }
       if (wasConnected) {
+        this.noteLink(peerId, "down", "local", reason);
         this.noteLocalCapacityChanged();
         this.emit("peer:disconnected", peerId);
         this.broadcastMembership();
@@ -7368,6 +7446,9 @@ var PeerPigeonNode = class {
   getConnectedPeers() {
     return this.mesh.getConnectedPeers();
   }
+  getLinkLog() {
+    return this.mesh.getLinkLog();
+  }
   getDiscoveredPeers() {
     return this.mesh.getDiscoveredPeers();
   }
@@ -7581,6 +7662,7 @@ export {
   isHealthy,
   isMeshSignalPayload,
   rankSignalingServersByDistance,
+  reachableFromThisPage,
   relayScore,
   roomRoutingKey,
   selectClosestSignalingServer,

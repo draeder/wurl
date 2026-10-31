@@ -649,6 +649,7 @@ declare class PeerPigeonStorage {
     private readonly onDirectMessageBound;
     private readonly onPeerConnectedBound;
     private readonly retrieveAnsweredAt;
+    private readonly retrieveAnswerTimes;
     private readonly pendingRetrieveRequests;
     private closed;
     private readonly onGossipMessageBound;
@@ -674,6 +675,9 @@ declare class PeerPigeonStorage {
     putSystem<T = unknown>(space: StorageSpace, key: string, value: T, options?: StoragePutOptions): Promise<StorageRecord<T>>;
     get<T = unknown>(space: StorageSpace, key: string): Promise<StorageRecord<T> | null>;
     retrieve<T = unknown>(space: StorageSpace, key: string, options?: StorageRetrieveOptions): Promise<StorageRecord<T> | null>;
+    /** How long to wait for a Get's answer: twice the slowest recent answer, within bounds. */
+    private expectedAnswerMs;
+    private noteAnswerTime;
     delete(space: StorageSpace, key: string): Promise<boolean>;
     deleteSystem(space: StorageSpace, key: string): Promise<boolean>;
     list(space: StorageSpace): Promise<StorageRecord[]>;
@@ -982,6 +986,13 @@ declare function discoverSignalingRelays(options: {
     directory?: string | false;
 }): Promise<RelayInfo[]>;
 /**
+ * Whether this page may open the relay's URL at all. An https page cannot
+ * open a plain ws:// connection except to this machine (browsers block it
+ * as mixed content), so a relay at ws://<public ip> is never tried there; a
+ * browser reaches such a relay through its direct (WebRTC) address instead.
+ */
+declare function reachableFromThisPage(url: string): boolean;
+/**
  * Read the public relay registry from one bootstrap, then order the relays.
  * Given a network and room, relays are chosen for the room (chooseRelays:
  * the room's relays, healthy local ones first, then by measured score);
@@ -1202,6 +1213,7 @@ declare class PartialMesh {
     /** First local observation of FreeRTC negotiations not tracked by PartialMesh. */
     private orphanRtcFirstSeenAtMs;
     private peerConnectedAtMs;
+    private linkLog;
     private discoveredAtMs;
     /** Peers present in the relay's latest un-graced discovery snapshot. */
     private activeSignalingPeers;
@@ -1349,6 +1361,16 @@ declare class PartialMesh {
     private noteDialFailure;
     private noteDialSuccess;
     private forgetStaleDialFailures;
+    private noteLink;
+    /** The last links that opened or closed, newest last: when, which peer, and why it closed. */
+    getLinkLog(): Array<{
+        at: number;
+        peer: string;
+        event: 'up' | 'down';
+        by: 'local' | 'remote';
+        reason: string;
+        links: number;
+    }>;
     private noteTransportDisconnect;
     private noteStablePeerConnections;
     private noteIntentionalShed;
@@ -1543,6 +1565,14 @@ declare class PeerPigeonNode {
     getCecrState(): CecrStateSnapshot;
     getClientId(): string | null;
     getConnectedPeers(): string[];
+    getLinkLog(): {
+        at: number;
+        peer: string;
+        event: "up" | "down";
+        by: "local" | "remote";
+        reason: string;
+        links: number;
+    }[];
     getDiscoveredPeers(): string[];
     getActiveSignalingPeers(): string[];
     getGlobalPeers(): string[];
@@ -1569,5 +1599,5 @@ declare class PeerPigeonNode {
     private emit;
 }
 
-export { DEFAULT_CLOSE_SIGNALING_RELAY_COUNT, DEFAULT_SIGNALING_SERVERS, GossipProtocol, MESH_SIGNAL_PAYLOAD_TYPE, NEGOTIATION_ACTIVE_ICE_DEADLINE_MS, NEGOTIATION_DEAD_TRANSPORT_DEADLINE_MS, NEGOTIATION_OFFER_DEADLINE_MS, PartialMesh, PeerPigeonCryptoProtocol, PeerPigeonNode, PeerPigeonStorage, RELAY_CANDIDATES, RELAY_SCORE_STORAGE_KEY, RELAY_SWITCH_MARGIN, RELAY_VIRTUAL_IDS, RelayScoreBook, chooseRelays, PartialMesh as default, directRelaySupported, discoverClosestSignalingServer, discoverClosestSignalingServers, discoverSignalingRelays, isHealthy, isMeshSignalPayload, rankSignalingServersByDistance, relayScore, roomRoutingKey, selectClosestSignalingServer, sha1Hex };
+export { DEFAULT_CLOSE_SIGNALING_RELAY_COUNT, DEFAULT_SIGNALING_SERVERS, GossipProtocol, MESH_SIGNAL_PAYLOAD_TYPE, NEGOTIATION_ACTIVE_ICE_DEADLINE_MS, NEGOTIATION_DEAD_TRANSPORT_DEADLINE_MS, NEGOTIATION_OFFER_DEADLINE_MS, PartialMesh, PeerPigeonCryptoProtocol, PeerPigeonNode, PeerPigeonStorage, RELAY_CANDIDATES, RELAY_SCORE_STORAGE_KEY, RELAY_SWITCH_MARGIN, RELAY_VIRTUAL_IDS, RelayScoreBook, chooseRelays, PartialMesh as default, directRelaySupported, discoverClosestSignalingServer, discoverClosestSignalingServers, discoverSignalingRelays, isHealthy, isMeshSignalPayload, rankSignalingServersByDistance, reachableFromThisPage, relayScore, roomRoutingKey, selectClosestSignalingServer, sha1Hex };
 export type { CecrConfigSnapshot, CecrMembershipRecordSnapshot, CecrOverlaySnapshot, CecrStateSnapshot, EncryptedBroadcastPayload, EncryptedDirectPayload, GossipAggregateDeliveryStatus, GossipBroadcastOptions, GossipDeliveryStatus, GossipMessage, GossipProtocolOptions, GossipStats, PartialMeshConfig, PartialMeshEvents, PartialMeshRuntimeConfig, PeerCapacityAdvertisement, PeerCapacitySnapshot, PeerConnection, PeerGraphEdge, PeerGraphNode, PeerGraphSnapshot, PeerPigeonCryptoEvents, PeerPigeonCryptoOptions, PeerPigeonKeyPair, PeerPigeonNodeEvents, PeerPigeonNodeMessage, PeerPigeonNodeOptions, PeerPigeonNodeStorageOptions, PeerPublicKey, RelayInfo, RelayKind, RelayMeasurement, RoomCipher, SharedRelayScore, SignalingRelayCandidate, StorageChangeOrigin, StorageEvents, StorageOptions, StoragePutOptions, StorageRecord, StorageRetrieveOptions, StorageSpace, StorageSyncFilterContext, StorageSyncOptions, StorageUnsubscribe };
