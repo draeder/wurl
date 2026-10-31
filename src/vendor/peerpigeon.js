@@ -1,4 +1,4 @@
-// PeerPigeon fed2333 (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 2abf89c (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, directoryRecordUrl, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -5098,6 +5098,7 @@ var PartialMesh = class {
       signalingServers,
       automaticSignalingServer,
       relayDirectory: config.relayDirectory ?? DEFAULT_DIRECTORY_NAME,
+      debug: config.debug === true,
       networkId: config.networkId ?? config.sessionId ?? "peerpigeon",
       sessionId: config.sessionId ?? "default-session",
       autoDiscover: config.autoDiscover ?? true,
@@ -6451,7 +6452,7 @@ var PartialMesh = class {
       }
     }
     try {
-      console.warn(`[PartialMesh] hardReset(${reason}) clientId=${this.clientId ?? ""} discovered=${this.discoveredPeers.size}`);
+      if (this.config.debug) console.warn(`[PartialMesh] hardReset(${reason}) clientId=${this.clientId ?? ""} discovered=${this.discoveredPeers.size}`);
     } catch {
     }
   }
@@ -6951,7 +6952,7 @@ var PartialMesh = class {
         try {
           handler(...args);
         } catch (err) {
-          console.error(`Error in event handler for ${event}:`, err);
+          if (this.config.debug) console.error(`Error in event handler for ${event}:`, err);
         }
       });
     }
