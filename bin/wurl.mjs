@@ -179,7 +179,11 @@ if (target.auto && opt.messages) {
       // A relay on this machine that is not in the directory (behind NAT with
       // no open port) still serves this machine's peers for free, as long as
       // it reaches the others through a home relay rather than the cloud.
-      const local = here.length ? null : await fetch('http://127.0.0.1:8788/health', { signal: AbortSignal.timeout(2_000) })
+      // The relay on this machine is used by its local port (ws://127.0.0.1)
+      // even when it is in the directory: loopback needs no router, no UDP
+      // and no firewall rule, which its direct (WebRTC) address does, and a
+      // machine's firewall blocking that is invisible from here.
+      const local = await fetch('http://127.0.0.1:8788/health', { signal: AbortSignal.timeout(2_000) })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const localUrl = String(local?.relay_url || '');
       const localFree = /^ws:\/\//.test(localUrl) && !/^ws:\/\/(127\.|localhost|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(localUrl);
@@ -192,7 +196,7 @@ if (target.auto && opt.messages) {
         target.signalUrls = chosen.map(noTunnel);
       }
       target.signalUrl = target.signalUrls[0];
-      if (!quiet) console.error(`wurl: stress run: peers use ${localFree ? `the relay on this machine (federated as ${localUrl})` : here.length ? 'the relay on this machine' : nearby.length ? 'the relay on this network' : 'the listed relays'} only, no cloud relay or tunnel`);
+      if (!quiet) console.error(`wurl: stress run: peers use ${localFree ? `the relay on this machine, at ws://127.0.0.1:8788 (federated as ${localUrl})` : here.length ? 'the relay on this machine' : nearby.length ? 'the relay on this network' : 'the listed relays'} only, no cloud relay or tunnel`);
     } else {
       target.signalUrl = 'auto';
       target.signalUrls = ['auto'];
