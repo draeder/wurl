@@ -1,4 +1,4 @@
-// PeerPigeon c2f95de (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 382d5fb (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, directoryRecordUrl, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -1242,9 +1242,14 @@ var _GossipProtocol = class _GossipProtocol {
       this.refreshAggregateState(aggregateState);
     }
     const sentPeers = [];
+    const now = Date.now();
+    const heldMs = Math.max(0, now - (this.messageLog.get(message.id)?.timestamp ?? now));
+    const transitSoFar = Number.isFinite(message.transitMs) ? Number(message.transitMs) : 0;
     for (const peerId of connectedPeers) {
+      const rtt = this.mesh.getLinkRttMs?.(peerId) ?? null;
       const forwarded = {
         ...message,
+        transitMs: Math.round(transitSoFar + heldMs + (rtt && rtt > 0 ? rtt / 2 : 0)),
         hops: message.hops + 1,
         path: this.extendRoutePath(message.path, peerId),
         sentAt: [...Array.isArray(message.sentAt) ? message.sentAt.filter((t) => typeof t === "number").slice(-(MAX_ROUTE_TRACE_PEERS - 1)) : [], Date.now()],
@@ -4339,13 +4344,14 @@ var PeerPigeonStorage = class {
 };
 
 // src/crypto.ts
-import { decryptMessageWithMeta, encryptMessageWithMeta, generateRandomPair } from "unsea";
+import { decryptMessageWithMeta, encryptMessageWithMeta, generateRandomPair, hasPostQuantumKeys, upgradePair } from "unsea";
 var CRYPTO_PUBLIC_INFO_TYPE = "pp-crypto-public-info-v1";
 var CRYPTO_PUBLIC_REQUEST_TYPE = "pp-crypto-public-request-v1";
 var KEY_REQUEST_MIN_INTERVAL_MS = 5e3;
 var KEY_EXCHANGE_RETRY_DELAYS_MS = [250, 500, 1e3, 2e3, 4e3];
 var ENCRYPTED_BROADCAST_TYPE = "pp-encrypted-broadcast-v1";
 var ENCRYPTED_DIRECT_TYPE = "pp-encrypted-direct-v1";
+var ML_KEM_768_PUBLIC_KEY_CHARS = 1579;
 var PeerPigeonCryptoProtocol = class {
   constructor(mesh, gossip, options) {
     this.keyPair = null;
@@ -4386,8 +4392,9 @@ var PeerPigeonCryptoProtocol = class {
   }
   async init() {
     if (this.initialized) return;
-    this.keyPair = this.options.keyPair ?? this.loadStoredKeyPair() ?? await generateRandomPair();
-    this.validateKeyPair(this.keyPair);
+    const pair = this.options.keyPair ?? this.loadStoredKeyPair() ?? await generateRandomPair();
+    this.validateKeyPair(pair);
+    this.keyPair = hasPostQuantumKeys(pair) && pair.kpriv ? pair : upgradePair(pair);
     this.persistKeyPair(this.keyPair);
     this.initialized = true;
     this.gossip.on("messageReceived", this.onGossipMessageBound);
@@ -4494,7 +4501,10 @@ var PeerPigeonCryptoProtocol = class {
       __ppType: ENCRYPTED_DIRECT_TYPE,
       from: String(this.mesh.getClientId() ?? "").trim(),
       to: target,
-      cipher: await encryptMessageWithMeta(String(plaintext), { epub: recipient.epub }),
+      cipher: await encryptMessageWithMeta(
+        String(plaintext),
+        recipient.kpub ? { epub: recipient.epub, kpub: recipient.kpub } : { epub: recipient.epub }
+      ),
       timestamp: Date.now()
     };
   }
@@ -4514,7 +4524,7 @@ var PeerPigeonCryptoProtocol = class {
   }
   async decryptEncryptedDirect(payload) {
     if (!this.keyPair) throw new Error("Crypto protocol has not been initialized");
-    return await decryptMessageWithMeta(payload.cipher, this.keyPair.epriv);
+    return await decryptMessageWithMeta(payload.cipher, this.keyPair);
   }
   on(event, callback) {
     const callbacks = this.callbacks[event];
@@ -4580,6 +4590,7 @@ var PeerPigeonCryptoProtocol = class {
       from: peerId,
       pub: this.keyPair.pub,
       epub: this.keyPair.epub,
+      ...this.keyPair.kpub ? { kpub: this.keyPair.kpub } : {},
       timestamp: Date.now()
     };
   }
@@ -4609,10 +4620,12 @@ var PeerPigeonCryptoProtocol = class {
     if (!id || typeof payload.pub !== "string" || typeof payload.epub !== "string") return;
     const existing = this.publicKeys.get(id);
     if (existing && existing.updatedAt > payload.timestamp) return;
+    const kpub = typeof payload.kpub === "string" && payload.kpub.length === ML_KEM_768_PUBLIC_KEY_CHARS && /^[A-Za-z0-9_-]+$/.test(payload.kpub) ? payload.kpub : void 0;
     const value = {
       peerId: id,
       pub: payload.pub,
       epub: payload.epub,
+      ...kpub ? { kpub } : {},
       updatedAt: Number.isFinite(payload.timestamp) ? payload.timestamp : Date.now(),
       local: id === this.mesh.getClientId()
     };
@@ -4719,6 +4732,9 @@ var PEER_GONE_BACKOFF_MS = 6e4;
 var FILL_REFUSED_WINDOW_MS = 6e4;
 var FILL_BACKOFF_MIN_MS = 15e3;
 var FILL_BACKOFF_MAX_MS = 12e4;
+var REBALANCE_EDGE_MIN_AGE_MS = 6e4;
+var REBALANCE_COOLDOWN_MS = 3e4;
+var REBALANCE_COOLDOWN_MAX_MS = 6e5;
 var RENEWAL_FORWARD_MS = 300;
 var LEAVE_FLUSH_MS = 250;
 var BRIDGE_GRACE_MS = 8e3;
@@ -5044,6 +5060,7 @@ var PartialMesh = class {
     this.lastDialFailureAtMs = /* @__PURE__ */ new Map();
     this.dialBackoffUntilMs = /* @__PURE__ */ new Map();
     this.rebalanceCooldownUntilMs = 0;
+    this.rebalanceCooldownMs = REBALANCE_COOLDOWN_MS;
     this.rebalanceAttemptAtMs = /* @__PURE__ */ new Map();
     // Links to peers outside our membership when they formed: a bridge to a
     // separate part of the mesh, kept past maxPeers until membership merges.
@@ -5823,12 +5840,12 @@ var PartialMesh = class {
       return false;
     }
     const connectedAgeMs = now - (farthestConnected.connectedAt || 0);
-    if (connectedAgeMs < 4e3) {
+    if (connectedAgeMs < REBALANCE_EDGE_MIN_AGE_MS) {
       return false;
     }
     const candidatePriority = this.cecrOverlayDialPriority(closestCandidate.peerId);
     const repairsCecrOverlay = candidatePriority === 0 || candidatePriority === 1 && this.config.maxPeers > this.cecrCoordinateNeighbors().size;
-    const materiallyCloser = repairsCecrOverlay || closestCandidate.distance * 4n < farthestConnected.distance * 3n;
+    const materiallyCloser = repairsCecrOverlay || closestCandidate.distance * 2n < farthestConnected.distance;
     if (!materiallyCloser) {
       return false;
     }
@@ -5839,7 +5856,8 @@ var PartialMesh = class {
     if (otherDiscoveredPeers < 1) {
       return false;
     }
-    this.rebalanceCooldownUntilMs = now + 4e3;
+    this.rebalanceCooldownUntilMs = now + this.rebalanceCooldownMs;
+    this.rebalanceCooldownMs = Math.min(REBALANCE_COOLDOWN_MAX_MS, this.rebalanceCooldownMs * 2);
     this.rebalanceAttemptAtMs.set(closestCandidate.peerId, now);
     this.rebalanceAttemptAtMs.set(farthestConnected.peerId, now);
     this.pendingRebalanceDropByTarget.set(closestCandidate.peerId, farthestConnected.peerId);
@@ -6169,6 +6187,7 @@ var PartialMesh = class {
     }
     this.rebalanceAttemptAtMs.clear();
     this.rebalanceCooldownUntilMs = 0;
+    this.rebalanceCooldownMs = REBALANCE_COOLDOWN_MS;
     this.lastUnderConnectedRecoveryAtMs = 0;
     this.noteDiscoveryNews();
     this.underConnectedSinceMs = null;
@@ -6389,6 +6408,7 @@ var PartialMesh = class {
   }
   noteTransportDisconnect(peerId, connectedAt, reason) {
     if (reason === "local_close" || reason === "capacity_shed") return;
+    this.rebalanceCooldownMs = REBALANCE_COOLDOWN_MS;
     const connectedForMs = connectedAt > 0 ? Date.now() - connectedAt : 0;
     if (connectedForMs < STABLE_PEER_CONNECTION_MS) {
       this.noteDialFailure(peerId);
@@ -6519,6 +6539,7 @@ var PartialMesh = class {
       return sorted.slice(0, Math.min(count, sorted.length));
     };
     const livePendingCount = Array.from(this.peers.values()).filter((peer) => !peer.connected && (this.activeSignalingPeers.has(peer.id) || this.meshCanSignal(peer.id))).length;
+    const fillCeiling = Math.max(this.config.minPeers + 1, this.config.maxPeers - 1);
     if (connectedCount < this.config.minPeers && connectedCount + livePendingCount < this.config.minPeers && available.length > 0) {
       for (const peerId of pickCandidates(Math.max(1, this.config.minPeers - connectedCount))) {
         this.connectToPeerInternal(peerId, true);
@@ -6533,14 +6554,16 @@ var PartialMesh = class {
       for (const peerId of pickCandidates(tryCount)) {
         this.connectToPeer(peerId);
       }
-    } else if (totalInProgress < this.config.maxPeers && available.length > 0) {
+    } else if (totalInProgress < fillCeiling && available.length > 0) {
       if (now < this.rebalanceCooldownUntilMs || now < this.fillBackoffUntilMs) {
         return;
       }
       if (this.fillBackoffMs > 0 && now - this.fillBackoffUntilMs > FILL_BACKOFF_MAX_MS) this.fillBackoffMs = 0;
+      const healthy = connectedCount > this.config.minPeers;
       const withRoom = (peerId) => {
         const capacity = this.freshPeerCapacity(peerId);
-        if (this.cecrOverlayDialPriority(peerId) === 0) return true;
+        if (!healthy && this.cecrOverlayDialPriority(peerId) === 0) return true;
+        if (healthy) return Boolean(capacity) && capacity.connectedPeers < capacity.maxPeers;
         if (!capacity) return !this.globalPeers.has(peerId);
         return capacity.connectedPeers < capacity.maxPeers;
       };
@@ -6690,6 +6713,23 @@ var PartialMesh = class {
   /**
    * Get list of connected peer IDs
    */
+  /**
+   * Ask the relay this peer is on to do something itself, such as a PigeonIdP
+   * account lookup ({ action: 'idp-get', namespace, alias }). Resolves with the
+   * relay's answer ({ ok: false, error: 'unsupported' } from a relay that does
+   * not serve it); rejects when not on a relay or when no answer comes.
+   */
+  async relayRequest(body, options = {}) {
+    const client = this.signalingClient?.client;
+    if (typeof client?.relayRequest !== "function") throw new Error("not on a relay");
+    return client.relayRequest(body, options);
+  }
+  /** Smoothed round trip of the link to a neighbour, ms, measured by its keepalive; null when unknown. */
+  getLinkRttMs(peerId) {
+    const entry = this.signalingClient?.client?.mesh?.connections?.get?.(peerId);
+    const rtt = Number(entry?.rttMs);
+    return Number.isFinite(rtt) && rtt > 0 ? rtt : null;
+  }
   getConnectedPeers() {
     return Array.from(this.peers.values()).filter((pc) => pc.connected).map((pc) => pc.id);
   }
@@ -6708,7 +6748,7 @@ var PartialMesh = class {
    */
   getGlobalPeers() {
     this.pruneMembershipRecords(Date.now(), false);
-    return Array.from(this.globalPeers).filter((peerId) => !this.isSelfAlias(peerId) && !this.retiredPeerIds.has(peerId));
+    return Array.from(this.globalPeers).filter((peerId) => !this.isSelfAlias(peerId) && !this.retiredPeerIds.has(peerId) && !this.hasLeft(peerId));
   }
   getCecrMembershipRecords() {
     this.pruneMembershipRecords();
@@ -7189,6 +7229,7 @@ var PartialMesh = class {
         if (record.state === "left") {
           departureMerged = true;
           this.forgetDepartedPeer(peerId);
+          renewed.push(peerId);
         } else {
           renewed.push(peerId);
           if (!wasMember) returning.push(peerId);
@@ -7374,6 +7415,7 @@ var PartialMesh = class {
     this.noteDiscoveryNews();
     this.lastSignalingReconnectAtMs = 0;
     this.rebalanceCooldownUntilMs = 0;
+    this.rebalanceCooldownMs = REBALANCE_COOLDOWN_MS;
     this.dialFailureCount.clear();
     this.dialBackoffUntilMs.clear();
     this.signalingClient = null;
