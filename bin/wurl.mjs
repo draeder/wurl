@@ -176,27 +176,50 @@ if (target.auto && opt.messages) {
       const subnet = (ip) => ip.split('.').slice(0, 3).join('.');
       const here = listed.filter((record) => lanHosts(record).some((host) => mine.includes(host)));
       const nearby = listed.filter((record) => lanHosts(record).some((host) => mine.some((ip) => subnet(ip) === subnet(host))));
-      // A relay on this machine that is not in the directory (behind NAT with
-      // no open port) still serves this machine's peers for free, as long as
-      // it reaches the others through a home relay rather than the cloud.
-      // The relay on this machine is used by its local port (ws://127.0.0.1)
-      // even when it is in the directory: loopback needs no router, no UDP
-      // and no firewall rule, which its direct (WebRTC) address does, and a
-      // machine's firewall blocking that is invisible from here.
+      // Which relays this machine can actually reach. The relay on this
+      // machine first, by its loopback port (no router, UDP or firewall rule
+      // in the way), when it answers and is federated; then every directory
+      // relay that opens a direct channel from here, tried now in parallel:
+      // the one on this machine, then this network, then the rest. A relay
+      // that is listed but does not answer is left out.
       const local = await fetch('http://127.0.0.1:8788/health', { signal: AbortSignal.timeout(2_000) })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const localUrl = String(local?.relay_url || '');
       const localFree = /^ws:\/\//.test(localUrl) && !/^ws:\/\/(127\.|localhost|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(localUrl);
       if (local && !localFree && !quiet) console.error(`wurl: the relay on this machine is ${localUrl.startsWith('wss:') ? `federated through a cloud tunnel (${localUrl})` : `not federated yet (${localUrl})`}; not using it`);
       const noTunnel = (record) => directoryRecordUrl({ ...record, tunnel: null });
+      const { installWebRTC } = await import('../src/webrtc.js');
+      await installWebRTC({ engine: ['native', 'werift', 'auto'].includes(opt.webrtc) ? opt.webrtc : 'auto' });
+      const { directRelayChannel } = await import('freertc/client');
+      const reaches = async (record) => {
+        try {
+          const { pc } = await directRelayChannel(noTunnel(record), { timeoutMs: 6_000 });
+          try { pc.close(); } catch {}
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const answered = await Promise.all(listed.map(reaches));
+      const reachable = listed.filter((_, i) => answered[i]);
+      const rank = (record) => (here.includes(record) ? 0 : nearby.includes(record) ? 1 : 2);
+      reachable.sort((a, b) => rank(a) - rank(b));
+      if (!quiet) {
+        for (const [i, record] of listed.entries()) {
+          console.error(`  ${answered[i] ? 'reachable  ' : 'no answer  '} ${record.name || record.node_id.slice(0, 8)} ${noTunnel(record).split('?')[0].replace(/\/sha256\/.*/, '')}${here.includes(record) ? ' (this machine)' : nearby.includes(record) ? ' (this network)' : ''}`);
+        }
+      }
       if (localFree) {
         target.signalUrls = ['ws://127.0.0.1:8788/ws'];
+      } else if (reachable.length) {
+        const best = rank(reachable[0]);
+        target.signalUrls = reachable.filter((record) => rank(record) === best).map(noTunnel);
       } else {
-        const chosen = here.length ? here : nearby.length ? nearby : listed;
-        target.signalUrls = chosen.map(noTunnel);
+        console.error('wurl: no relay in the DNS directory answers from here, and none runs on this machine; start one (node scripts/node-relay.mjs in freertc)');
+        process.exit(6);
       }
       target.signalUrl = target.signalUrls[0];
-      if (!quiet) console.error(`wurl: stress run: peers use ${localFree ? `the relay on this machine, at ws://127.0.0.1:8788 (federated as ${localUrl})` : here.length ? 'the relay on this machine' : nearby.length ? 'the relay on this network' : 'the listed relays'} only, no cloud relay or tunnel`);
+      if (!quiet) console.error(`wurl: stress run: peers use ${localFree ? `the relay on this machine, at ws://127.0.0.1:8788 (federated as ${localUrl})` : `${target.signalUrls.length === 1 ? 'the reachable relay' : 'the reachable relays'} ${rank(reachable[0]) === 0 ? 'on this machine' : rank(reachable[0]) === 1 ? 'on this network' : 'elsewhere'}`} only, no cloud relay or tunnel`);
     } else {
       target.signalUrl = 'auto';
       target.signalUrls = ['auto'];
