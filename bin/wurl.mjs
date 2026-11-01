@@ -242,24 +242,54 @@ const t = (seconds) => `${seconds.toFixed(2)}s`;
 // update is its own line, so a log still reads in order.
 const LIVE = process.stderr.isTTY === true;
 let statusLine = null;
-const fit = (line) => {
-  const columns = process.stderr.columns || 0;
-  return columns > 1 && line.length >= columns ? `${line.slice(0, columns - 2)}…` : line;
-};
+
+/**
+ * A line redrawn in place on a terminal, shown whole: a line wider than the
+ * terminal wraps onto the rows below, and the next draw clears all of them.
+ * (It used to be cut at the terminal's width, so the end was lost.)
+ */
+function liveLine(stream) {
+  let rows = 0;
+  const rowsOf = (text) => {
+    const columns = stream.columns || 0;
+    const width = [...text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')].length;
+    return columns > 0 ? Math.max(1, Math.ceil(width / columns)) : 1;
+  };
+  const clear = () => {
+    if (rows > 1) stream.write(`\x1b[${rows - 1}A`);
+    if (rows > 0) stream.write('\r\x1b[J');
+    rows = 0;
+  };
+  return {
+    draw(text) {
+      clear();
+      stream.write(text);
+      rows = rowsOf(text);
+    },
+    clear,
+    /** Leave the line where it is and move below it. */
+    end() {
+      if (rows > 0) stream.write('\n');
+      rows = 0;
+    },
+  };
+}
+
+const statusDisplay = liveLine(process.stderr);
 const say = (line) => {
   if (quiet) return;
-  if (LIVE && statusLine !== null) process.stderr.write('\r\x1b[K');
+  if (LIVE && statusLine !== null) statusDisplay.clear();
   process.stderr.write(`${line}\n`);
-  if (LIVE && statusLine !== null) process.stderr.write(fit(statusLine));
+  if (LIVE && statusLine !== null) statusDisplay.draw(statusLine);
 };
 const status = (line) => {
   if (quiet) return;
   if (!LIVE) { process.stderr.write(`${line}\n`); return; }
   statusLine = line;
-  process.stderr.write(`\r\x1b[K${fit(line)}`);
+  statusDisplay.draw(line);
 };
 const endStatus = () => {
-  if (LIVE && statusLine !== null && !quiet) process.stderr.write('\n');
+  if (LIVE && statusLine !== null && !quiet) statusDisplay.end();
   statusLine = null;
 };
 
@@ -291,11 +321,10 @@ if (opt.messages && opt.soak !== undefined) {
   const line = (text) => console.log(`* ${text}`);
   // --hold on a terminal: the mesh reports overwrite one line instead of adding lines.
   const live = opt.hold && process.stdout.isTTY;
-  const report = live
-    ? (text) => process.stdout.write(`\r\x1b[2K* ${text}`.slice(0, Math.max(40, (process.stdout.columns || 160) - 1)))
-    : line;
+  const holdDisplay = liveLine(process.stdout);
+  const report = live ? (text) => holdDisplay.draw(`* ${text}`) : line;
   if (opt.hold) {
-    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { if (live) process.stdout.write('\n'); console.log('* stopped; the peers are leaving'); process.exit(0); });
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { if (live) holdDisplay.end(); console.log('* stopped; the peers are leaving'); process.exit(0); });
   }
   line(`wurl ${opt.hold ? '--hold' : '--messages --soak'}: ${PEERS} PeerPigeon peers on ${target.signalUrls.join(', ')}, network ${target.network}, room ${target.room}${opt.hold ? '' : `, for ${clock(soakS)}`}`);
   line(`topology ${tp.name}: minPeers ${tp.minPeers}, maxPeers ${tp.maxPeers}, tolerantPeers ${tp.tolerantPeers} (from ${tp.source})`);
