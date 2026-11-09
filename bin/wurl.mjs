@@ -14,7 +14,10 @@ function isLocalRelay(url) {
     // .test is reserved (RFC 2606): never a public relay, so test hostnames count as local.
     return host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.test') || host === '::1'
       || host === 'host.docker.internal' || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
-      || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+      || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+      // A home relay's own https name (freertc: its node id's first 16 hex, under a relay domain, as
+      // ef0d4c0a988ec0d2.decentralize.ooo): someone's own Node relay, not a cloud one with a daily limit.
+      || /^[0-9a-f]{16}\.[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host);
   } catch {
     return false;
   }
@@ -335,10 +338,6 @@ if (opt.chess) {
   const named = (key) => new URL(positionals[0].includes('://') ? positionals[0] : `https://${positionals[0]}`).searchParams.has(key);
   const network = opt.network ?? (named('network') || named('networkName') ? target.network : 'pigeonchess');
   const room = opt.room ?? (named('room') || named('sessionId') ? target.room : 'global');
-  if (PEERS > PUBLIC_PEER_LIMIT && !opt['public-load'] && (target.auto || !target.signalUrls.every((u) => /\/\/(127\.|localhost|192\.168\.|10\.)/.test(u)))) {
-    console.error(`wurl: ${PEERS} bots against a public relay: add --public-load, or use a local relay (--signal ws://127.0.0.1:8788/ws)`);
-    process.exit(2);
-  }
   let create = null;
   try {
     if (opt.create) create = { name: opt.create, timeControl: parseClock(opt.clock), start: { kind: 'players', players: Math.max(2, Number.parseInt(opt.players ?? '', 10) || PEERS) }, maxPlayers: Math.max(PEERS, Number.parseInt(opt.players ?? '', 10) || PEERS) };
