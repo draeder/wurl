@@ -184,7 +184,7 @@ const quiet = opt.silent || opt.json;
 // page do: relays in the DNS relay directory first (home relays, reached
 // with no cloud relay in the way). Only when none is listed do they use the
 // relay the URL implies.
-if (target.auto && opt.messages) {
+if (target.auto && (opt.messages || opt.chess)) {
   const { lookupDirectRelays, directoryRecordUrl } = await import('freertc/client');
   const listed = await lookupDirectRelays({ network: target.network, room: target.room }).catch(() => []);
   if (listed.length) {
@@ -245,6 +245,7 @@ if (target.auto && opt.messages) {
         process.exit(6);
       }
       target.signalUrl = target.signalUrls[0];
+      target.chosen = true;
       if (!quiet) console.error(`wurl: stress run: peers use ${localFree ? `the relay on this machine, at ws://127.0.0.1:8788 (federated as ${localUrl})` : `${target.signalUrls.length === 1 ? 'the reachable relay' : 'the reachable relays'} ${rank(reachable[0]) === 0 ? 'on this machine' : rank(reachable[0]) === 1 ? 'on this network' : 'elsewhere'}`} only, no cloud relay or tunnel`);
     } else {
       target.signalUrl = 'auto';
@@ -362,10 +363,11 @@ if (opt.chess) {
     process.exit(2);
   }
   const say = (text) => console.log(text);
-  say(`* wurl --chess: ${PEERS} computer players (${opt.level}) on ${target.auto ? 'the relays PigeonChess pages use' : target.signalUrls.join(', ')}, ${network} / ${room}; ${create ? `creating "${create.name}"` : `signing up for ${opt.join === 'all' ? 'every open tournament' : `"${opt.join}"`}`}. Ctrl-C to stop.`);
+  say(`* wurl --chess: ${PEERS} computer players (${opt.level}) on ${target.auto && !target.chosen ? 'the relays PigeonChess pages use' : target.signalUrls.join(', ')}, ${network} / ${room}; ${create ? `creating "${create.name}"` : `signing up for ${opt.join === 'all' ? 'every open tournament' : `"${opt.join}"`}`}. Ctrl-C to stop.`);
   const run = runChessBots({
     bots: PEERS, level: opt.level, join: opt.join, create, prefix: 'wurlbot',
-    signalUrls: target.auto ? ['auto'] : target.signalUrls, network, room, engine: opt.webrtc, say,
+    // A big run: the relays found above (this machine's, else this network's); otherwise each bot picks as a page does.
+    signalUrls: target.auto && !target.chosen ? ['auto'] : target.signalUrls, network, room, engine: opt.webrtc, say,
   });
   process.on('SIGINT', () => { say('* stopping'); run.stop(); setTimeout(() => process.exit(0), 3000).unref(); });
   await run.done;
