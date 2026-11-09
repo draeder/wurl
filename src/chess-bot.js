@@ -144,7 +144,8 @@ const tidy = async () => {
     const id = v.tournament.id;
     const mine = v.signups.some((s) => s.player === me.pub && !s.withdrawn);
     if (mine || signedUp.has(id) || v.status !== 'open') continue;
-    if (join !== 'all' && join !== id) continue;
+    // --join: all, a tournament's id, or its name (any case).
+    if (join !== 'all' && join !== id && join.trim().toLowerCase() !== v.tournament.name.trim().toLowerCase()) continue;
     if (chess.signedUp(v.signups).length >= v.tournament.maxPlayers) continue;
     signedUp.add(id);
     await client.join(id).then(() => emit('signed-up', { text: `signed up for "${v.tournament.name}"` })).catch((e) => { signedUp.delete(id); emit('note', { text: `could not sign up: ${e.message}` }); });

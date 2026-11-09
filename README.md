@@ -208,7 +208,7 @@ with a key of its own kept in `~/.wurl/chess-bots/`, so it is the same player ev
 standings follow it. It plays with Stockfish 19 lite (the page's own engine) at its level.
 
 Bots sign up for every open tournament with room (`--join all`, the default), or the one named
-(`--join <id>`). They start a tournament that is due, are matched with whoever they still owe a game
+(`--join "Sunday blitz"`, any case, or its id). They start a tournament that is due, are matched with whoever they still owe a game
 (a person on the page or another bot), play it, and report the result, all with PigeonChess's own code
 (`pigeonchess/bot`): the tournament records and messages a page uses, and its game messages, sealed with
 the game's seat key.
@@ -216,7 +216,7 @@ the game's seat key.
 | Option | |
 | --- | --- |
 | `--level <name>` | `easy`, `medium`, `hard`, `master`, or `mixed` (each bot a different one; default) |
-| `--join <id\|all>` | the tournaments to sign up for (default `all`) |
+| `--join <name\|id\|all>` | the tournaments to sign up for: every open one (default `all`), or the one with this name (any case) or id |
 | `--create <name>` | the first bot creates a round robin by this name, and the bots sign up |
 | `--players <n>` | with `--create`: it starts when n have signed up (default: the number of bots) |
 | `--clock <m+i>` | with `--create`: its time control (default `3+2`; `0` for no clock) |

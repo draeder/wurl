@@ -81,8 +81,8 @@ options:
                          is pigeonchess / global unless -n / -r say otherwise.
       --level <name>     with --chess: easy, medium, hard, master, or mixed (each bot a different one;
                          default)
-      --join <id|all>    with --chess: the tournaments to sign up for: every open one with room (all,
-                         the default) or the one with this id
+      --join <name|id|all>  with --chess: the tournaments to sign up for: every open one with room (all,
+                         the default), or the one with this name (any case) or id
       --create <name>    with --chess: the first bot creates a tournament by this name, and all sign up
       --players <n>      with --create: it starts when n have signed up (default: the number of bots)
       --clock <m+i>      with --create: its time control (default 3+2; 0 for no clock)
@@ -347,7 +347,7 @@ if (opt.chess) {
     process.exit(2);
   }
   const say = (text) => console.log(text);
-  say(`* wurl --chess: ${PEERS} computer players (${opt.level}) on ${target.auto ? 'the relays PigeonChess pages use' : target.signalUrls.join(', ')}, ${network} / ${room}; ${create ? `creating "${create.name}"` : `signing up for ${opt.join === 'all' ? 'every open tournament' : `tournament ${opt.join}`}`}. Ctrl-C to stop.`);
+  say(`* wurl --chess: ${PEERS} computer players (${opt.level}) on ${target.auto ? 'the relays PigeonChess pages use' : target.signalUrls.join(', ')}, ${network} / ${room}; ${create ? `creating "${create.name}"` : `signing up for ${opt.join === 'all' ? 'every open tournament' : `"${opt.join}"`}`}. Ctrl-C to stop.`);
   const run = runChessBots({
     bots: PEERS, level: opt.level, join: opt.join, create, prefix: 'wurlbot',
     signalUrls: target.auto ? ['auto'] : target.signalUrls, network, room, engine: opt.webrtc, say,
