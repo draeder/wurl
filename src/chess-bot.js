@@ -89,6 +89,12 @@ const send = async (peerId, message) => {
 };
 
 let game = null;
+// Games over here, kept 10 minutes: the other side may have missed how one ended, and asks.
+const ended = new Map();
+const retire = (g) => {
+  ended.set(g.gameId, g);
+  setTimeout(() => { if (ended.get(g.gameId) === g) { g.stop(); ended.delete(g.gameId); } }, 10 * 60 * 1000).unref?.();
+};
 let nextSeat = await chess.makeSeatKeys();
 const me = { pub: keys.pub, name, keys: unsea.publicKeysOf(keys), bot: { level: lvl.name } };
 const short = (key) => `${String(key).slice(0, 6)}…`;
@@ -108,6 +114,7 @@ const client = new chess.TournamentClient({
     const mySeat = nextSeat;
     void chess.makeSeatKeys().then((k) => { nextSeat = k; });
     emit('matched', { text: `plays ${nameOf(match.opponentKey)} as ${match.myColor} (${match.timeControl.minutes}+${match.timeControl.increment})` });
+    if (game) retire(game);
     game = new chess.BotGame({
       gameId: match.gameId, myColor: match.myColor, opponent: match.opponent, mySeat, theirSeat: match.theirSeat ?? '',
       timeControl: match.timeControl, send, chooseMove,
@@ -128,6 +135,7 @@ node.on('message', (m) => {
   try { message = typeof m.data === 'string' ? JSON.parse(m.data) : m.data; } catch { return; }
   if (!from || !message) return;
   if (game?.handle(message, from)) return;
+  if (message?.type === 'sealed' && ended.get(message.gameId)?.handle(message, from)) return;
   client.handle(message, from);
 });
 
