@@ -89,6 +89,9 @@ options:
       --create <name>    with --chess: the first bot creates a tournament by this name, and all sign up
       --players <n>      with --create: it starts when n have signed up (default: the number of bots)
       --clock <m+i>      with --create: its time control (default 3+2; 0 for no clock)
+      --format <f>       with --create: round-robin (default; up to 16), swiss or arena (up to 100)
+      --rounds <n>       with --format swiss: how many rounds (default 5)
+      --duration <min>   with --format arena: how long it runs, in minutes (default 60; 5 to 1440)
       --settle <s>       with --messages: how long the formed mesh must hold steady before anyone sends (default 3)
       --webrtc <engine>  with --messages: native (node-datachannel, C++), werift (JavaScript), or auto:
                          native when node-datachannel is installed, else werift (default auto).
@@ -137,6 +140,9 @@ try {
       create: { type: 'string' },
       players: { type: 'string' },
       clock: { type: 'string', default: '3+2' },
+      format: { type: 'string', default: 'round-robin' },
+      rounds: { type: 'string' },
+      duration: { type: 'string' },
       cost: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -340,7 +346,17 @@ if (opt.chess) {
   const room = opt.room ?? (named('room') || named('sessionId') ? target.room : 'global');
   let create = null;
   try {
-    if (opt.create) create = { name: opt.create, timeControl: parseClock(opt.clock), start: { kind: 'players', players: Math.max(2, Number.parseInt(opt.players ?? '', 10) || PEERS) }, maxPlayers: Math.max(PEERS, Number.parseInt(opt.players ?? '', 10) || PEERS) };
+    if (opt.create) {
+      if (!['round-robin', 'swiss', 'arena'].includes(opt.format)) throw new Error(`--format: round-robin, swiss or arena, not ${opt.format}`);
+      const players = Math.max(2, Number.parseInt(opt.players ?? '', 10) || PEERS);
+      create = {
+        name: opt.create, format: opt.format, timeControl: parseClock(opt.clock), start: { kind: 'players', players },
+        // Round robin: as many as start it; Swiss and arena: room for others to join (arena: even late).
+        maxPlayers: opt.format === 'round-robin' ? Math.min(16, Math.max(PEERS, players)) : 100,
+        ...(opt.format === 'swiss' ? { rounds: Number.parseInt(opt.rounds ?? '', 10) || 5 } : {}),
+        ...(opt.format === 'arena' ? { minutes: Number.parseInt(opt.duration ?? '', 10) || 60 } : {}),
+      };
+    }
   } catch (error) {
     console.error(`wurl: ${error.message}`);
     process.exit(2);

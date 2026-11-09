@@ -151,10 +151,12 @@ const tidy = async () => {
   for (const v of client.view()) {
     const id = v.tournament.id;
     const mine = v.signups.some((s) => s.player === me.pub && !s.withdrawn);
-    if (mine || signedUp.has(id) || v.status !== 'open') continue;
+    // Open, or an arena still running (players join it late).
+    const late = v.format === 'arena' && v.status === 'running' && v.endsAt - Date.now() > 5 * 60_000;
+    if (mine || signedUp.has(id) || (v.status !== 'open' && !late)) continue;
     // --join: all, a tournament's id, or its name (any case).
     if (join !== 'all' && join !== id && join.trim().toLowerCase() !== v.tournament.name.trim().toLowerCase()) continue;
-    if (chess.signedUp(v.signups).length >= v.tournament.maxPlayers) continue;
+    if ((late ? v.players.length : chess.signedUp(v.signups).length) >= chess.maxPlayersOf(v.tournament)) continue;
     signedUp.add(id);
     await client.join(id).then(() => emit('signed-up', { text: `signed up for "${v.tournament.name}"` })).catch((e) => { signedUp.delete(id); emit('note', { text: `could not sign up: ${e.message}` }); });
   }
@@ -177,16 +179,43 @@ if (process.env.WURL_CHESS_DEBUG) {
 void client.refresh().then(tidy);
 
 // The standings of its tournaments, now and then (bot 0 only: the others would say the same).
+const standingsOf = (views) => {
+  const lines = [];
+  for (const v of views) {
+    const played = v.pairings.filter((p) => chess.gameState(p, v.reports).state !== 'unplayed').length;
+    const where = v.format === 'arena'
+      ? `${played} games${v.status === 'running' ? `, ${Math.max(0, Math.round((v.endsAt - Date.now()) / 60_000))} min left` : ''}`
+      : v.format === 'swiss' ? `round ${v.round}/${v.tournament.rounds}, ${played}/${v.pairings.length} games` : `${played}/${v.pairings.length} games`;
+    lines.push(`"${v.tournament.name}" (${v.format}) ${v.status}, ${where}`);
+    v.table.forEach((r, k) => lines.push(`  ${k + 1}. ${(v.names.get(r.player) ?? short(r.player)).padEnd(22)} ${String(r.points).padStart(4)}  (${r.wins}-${r.draws}-${r.losses})`));
+  }
+  return lines;
+};
 if (i === 0) {
   setInterval(() => {
-    const lines = [];
-    for (const v of client.view().filter((x) => x.status === 'running' || x.status === 'finished').slice(0, 3)) {
-      const played = v.pairings.filter((p) => chess.gameState(p, v.reports).state !== 'unplayed').length;
-      lines.push(`"${v.tournament.name}" ${v.status}, ${played}/${v.pairings.length} games`);
-      v.table.forEach((r, k) => lines.push(`  ${k + 1}. ${(v.names.get(r.player) ?? short(r.player)).padEnd(22)} ${String(r.points).padStart(4)}  (${r.wins}-${r.draws}-${r.losses})`));
-    }
+    const lines = standingsOf(client.view().filter((x) => x.status === 'running' || x.status === 'finished').slice(0, 3));
     if (lines.length) report({ type: 'standings', lines });
   }, 60_000);
+}
+
+// --join <name|id> or --create: once that tournament is over (or started without this bot), it stops,
+// and wurl ends when the last bot has. --join all keeps going, for whatever comes next.
+const target = (v) => signedUp.has(v.tournament.id) || (join !== 'all' && (join === v.tournament.id || join.trim().toLowerCase() === v.tournament.name.trim().toLowerCase()));
+let quietSince = 0;
+if (create || join !== 'all') {
+  setInterval(() => {
+    const mine = client.view().filter(target);
+    if (!mine.length) return;
+    const over = mine.every((v) => v.status === 'finished' || v.status === 'cancelled'
+      || (v.status === 'running' && !v.players.includes(me.pub) && !(v.format === 'arena' && v.endsAt - Date.now() > 5 * 60_000)));
+    // Not mid-game, and a few seconds after the last one (its result written, the other side caught up).
+    if (!over || (game && !game.finished)) { quietSince = 0; return; }
+    if (!quietSince) { quietSince = Date.now(); return; }
+    if (Date.now() - quietSince < 15_000) return;
+    if (i === 0) report({ type: 'standings', lines: ['final', ...standingsOf(mine)] });
+    emit('finished', { text: mine.some((v) => v.players.includes(me.pub)) ? 'tournament over; stopping' : 'tournament started without it; stopping' });
+    setTimeout(() => void stop(), 500);
+  }, 5_000);
 }
 
 const stop = async () => {

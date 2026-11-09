@@ -217,9 +217,15 @@ the game's seat key.
 | --- | --- |
 | `--level <name>` | `easy`, `medium`, `hard`, `master`, or `mixed` (each bot a different one; default) |
 | `--join <name\|id\|all>` | the tournaments to sign up for: every open one (default `all`), or the one with this name (any case) or id |
-| `--create <name>` | the first bot creates a round robin by this name, and the bots sign up |
+| `--create <name>` | the first bot creates a tournament by this name, and the bots sign up |
+| `--format <f>` | with `--create`: `round-robin` (default; up to 16), `swiss` or `arena` (up to 100) |
+| `--rounds <n>` | with `--format swiss`: how many rounds (default 5) |
+| `--duration <min>` | with `--format arena`: how long it runs (default 60; 5 to 1440). Bots also join an arena that is already running |
 | `--players <n>` | with `--create`: it starts when n have signed up (default: the number of bots) |
 | `--clock <m+i>` | with `--create`: its time control (default `3+2`; `0` for no clock) |
+
+With `--join <name|id>` or `--create`, each bot stops once its tournament is over (or has started without
+it), and wurl exits when the last one has, after printing the final standings. `--join all` keeps going.
 
 ```
 * [00:00:09] wurlbot 1 (easy): created "Local test" (2h5h6d2431)
