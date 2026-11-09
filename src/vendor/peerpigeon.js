@@ -1,4 +1,4 @@
-// PeerPigeon 382d5fb (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
+// PeerPigeon 4301efd (https://github.com/PeerPigeon/PeerPigeon), its built dist/index.js.
 // Refresh with: npm run vendor:peerpigeon (copies ../PeerPigeon/dist/index.js).
 // src/index.ts
 import { isDirectRelayUrl, lookupDirectRelays, directRelayChannel, directoryRecordUrl, DEFAULT_DIRECTORY_NAME } from "freertc/client";
@@ -47,6 +47,8 @@ function isAttentionChangeOnly(reason) {
 }
 var FreeRTCClientAdapter = class {
   constructor(signalUrls, options) {
+    // The role each listed peer was announced with (capabilities.role).
+    this.peerRoles = /* @__PURE__ */ new Map();
     this.emitter = new Emitter();
     this.knownPeers = /* @__PURE__ */ new Set();
     this.knownPeerLastSeenAtMs = /* @__PURE__ */ new Map();
@@ -100,6 +102,7 @@ var FreeRTCClientAdapter = class {
       throw new Error("At least one FreeRTC signaling relay is required");
     }
     this.signalUrls = normalizedSignalUrls;
+    this.role = options?.role ?? null;
     this.networkId = options?.networkId ?? "default-session";
     this.roomId = options?.roomId ?? this.networkId;
     this.requestedPeerId = options?.peerId ?? generateMessageId(32);
@@ -211,6 +214,7 @@ var FreeRTCClientAdapter = class {
       signalUrl,
       iceServers: this.defaultIceServers ?? void 0,
       trickleIce: this.trickleIce,
+      capabilities: this.role ? { role: this.role } : {},
       autoConnect: false,
       relay: this.relayOnDemand ? { mode: "on-demand", ...this.relayHold ? { hold: this.relayHold } : {} } : {},
       onRelayStateChange: ({ state } = {}) => {
@@ -388,7 +392,7 @@ var FreeRTCClientAdapter = class {
       }
       this.nudgeTokens -= 1;
     }
-    this.client?.advertise?.({});
+    this.client?.advertise?.(this.role ? { role: this.role } : {});
     this.client?.requestBootstrap?.(Array.from(this.selfAliases));
   }
   /**
@@ -504,13 +508,22 @@ var FreeRTCClientAdapter = class {
     const id = this.normalizePeerId(peerId);
     return Boolean(id && this.selfAliases.has(id));
   }
+  /** The role a relay listed this peer with, or null. */
+  getPeerRole(peerId) {
+    return this.peerRoles.get(this.normalizePeerId(peerId)) ?? null;
+  }
   handleBootstrapCandidates(candidates) {
     const now = Date.now();
     const normalizedCandidates = (Array.isArray(candidates) ? candidates : []).map((candidate) => ({
       peerId: this.normalizePeerId(candidate?.peerId),
       advertisedAt: Number(candidate?.advertisedAt),
-      listedAt: Number(candidate?.listedAt)
+      listedAt: Number(candidate?.listedAt),
+      role: typeof (candidate?.role ?? candidate?.capabilities?.role) === "string" ? String(candidate?.role ?? candidate?.capabilities?.role) : null
     })).filter(({ peerId }) => peerId && !this.isSelfAlias(peerId));
+    for (const { peerId, role } of normalizedCandidates) {
+      if (role) this.peerRoles.set(peerId, role);
+      else this.peerRoles.delete(peerId);
+    }
     const snapshotPeers = new Set(normalizedCandidates.map(({ peerId }) => peerId));
     const activeSnapshotPeers = /* @__PURE__ */ new Set();
     for (const { peerId, advertisedAt, listedAt } of normalizedCandidates) {
@@ -3141,6 +3154,630 @@ var RelayScoreBook = class _RelayScoreBook {
 };
 
 // src/storage.ts
+import { signMessage, verifyMessage as verifyMessage2 } from "unsea";
+
+// src/storage-servers.ts
+import { verifyMessage } from "unsea";
+var STORAGE_SERVER_NETWORK = "peerpigeon-storage";
+var STORAGE_SERVER_ROOM = "servers";
+var STORAGE_SERVER_ROLE = "storage";
+var STORAGE_REPLICAS = 3;
+var REQUEST_TIMEOUT_MS = 4e3;
+var BLOB_TIMEOUT_MS = 2e4;
+var BATCH_RECORDS = 64;
+var BATCH_BYTES = 96 * 1024;
+var PP = "pp-ss-v1";
+async function ownerText(rec) {
+  return `pp-ss-owner-v1:${rec.room}:${rec.slot}:${rec.at}:${await sha256Hex(JSON.stringify(rec.blob))}`;
+}
+async function ownerSigned(rec) {
+  if (rec.owner === void 0 && rec.osig === void 0) return true;
+  if (typeof rec.owner !== "string" || typeof rec.osig !== "string") return false;
+  try {
+    return await verifyMessage(await ownerText(rec), rec.osig, rec.owner);
+  } catch {
+    return false;
+  }
+}
+var MAX_BLOB_BYTES = 160 * 1024;
+var hexBytes2 = (hex) => Uint8Array.from(hex.match(/../g), (h) => parseInt(h, 16));
+async function sha256Bytes2(bytes) {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function blobKey(hash) {
+  const key = await globalThis.crypto.subtle.importKey("raw", hexBytes2(await sha256Hex(`pp-blob-key-v1:${hash}`)), "AES-GCM", false, ["encrypt", "decrypt"]);
+  return { key, iv: hexBytes2(await sha256Hex(`pp-blob-iv-v1:${hash}`)).slice(0, 12) };
+}
+function blobAddress(hash) {
+  return sha256Hex(`pp-blob-addr-v1:${hash}`);
+}
+async function sealBlob(bytes) {
+  const hash = await sha256Bytes2(bytes);
+  const { key, iv } = await blobKey(hash);
+  const sealed = new Uint8Array(await globalThis.crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes));
+  return { hash, address: await blobAddress(hash), sealed };
+}
+async function openBlob(hash, sealed) {
+  try {
+    const { key, iv } = await blobKey(hash);
+    const bytes = new Uint8Array(await globalThis.crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, sealed));
+    return await sha256Bytes2(bytes) === hash ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+function toB64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 32768) s += String.fromCharCode(...bytes.subarray(i, i + 32768));
+  return btoa(s);
+}
+function fromB64(text) {
+  const s = atob(text);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+async function sha256Hex(text) {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function xorDistance(a, b) {
+  return BigInt(`0x${a.startsWith("o") ? a.slice(1) : a}`) ^ BigInt(`0x${b.startsWith("o") ? b.slice(1) : b}`);
+}
+async function ownedRoomOf(owner) {
+  return `o${await sha256Hex(`pp-ss-owned-room-v1:${owner}`)}`;
+}
+function validRoom(v) {
+  if (typeof v !== "string") return false;
+  const id = v;
+  return /^o?[0-9a-f]{64}$/.test(id);
+}
+function closestIds(target, ids, hashed, count = STORAGE_REPLICAS) {
+  return [...ids].filter((id) => hashed.has(id)).map((id) => ({ id, d: xorDistance(hashed.get(id), target) })).sort((x, y) => x.d < y.d ? -1 : x.d > y.d ? 1 : 0).slice(0, count).map((x) => x.id);
+}
+var strip = ({ wh: _wh, ...rec }) => rec;
+function isMsg(data) {
+  return !!data && typeof data === "object" && data.pp === PP && typeof data.t === "string";
+}
+function validId(v, len = 64) {
+  return typeof v === "string" && v.length === len && /^[0-9a-f]+$/.test(v);
+}
+function validRecord(rec) {
+  const r = rec;
+  return !!r && validRoom(r.room) && validId(r.slot) && validId(r.tag, 16) && Number.isFinite(r.at) && r.blob !== void 0;
+}
+function batches(items) {
+  const out = [];
+  let cur = [], bytes = 0;
+  for (const item of items) {
+    const size = JSON.stringify(item).length;
+    if (cur.length && (cur.length >= BATCH_RECORDS || bytes + size > BATCH_BYTES)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(item);
+    bytes += size;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+async function sendLater(node, peerId, msg) {
+  for (let wait = 50, spent = 0; spent < 15e3; spent += wait, wait = Math.min(500, wait * 2)) {
+    await new Promise((r) => setTimeout(r, wait));
+    if (!node.getConnectedPeers().includes(peerId)) return false;
+    if (node.sendDirect(peerId, msg) !== null) return true;
+  }
+  return false;
+}
+async function sendBytesSoon(node, peerId, meta, bytes) {
+  if (node.sendBytes(peerId, meta, bytes)) return true;
+  for (let wait = 10, spent = 0; spent < 15e3; spent += wait, wait = Math.min(200, wait * 2)) {
+    await new Promise((r) => setTimeout(r, wait));
+    if (!node.getConnectedPeers().includes(peerId)) return false;
+    if (node.sendBytes(peerId, meta, bytes)) return true;
+  }
+  return false;
+}
+var reqCounter = 0;
+var newReq = () => `${Date.now().toString(36)}-${(reqCounter++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+var StorageServerLink = class {
+  constructor(node) {
+    this.node = node;
+    this.hashed = /* @__PURE__ */ new Map();
+    this.pending = /* @__PURE__ */ new Map();
+    /** Servers that have sent us bytes (a blob, as bytes): they read them too. */
+    this.readsBytes = /* @__PURE__ */ new Set();
+    this.listings = /* @__PURE__ */ new Map();
+    this.rooms = /* @__PURE__ */ new Map();
+    this.listeners = /* @__PURE__ */ new Set();
+    this.timer = null;
+    this.closed = false;
+    this.refreshing = null;
+    this.refreshAgain = false;
+    node.on("message", (m) => {
+      if (m.kind === "direct" && m.fromPeerId) this.onMessage(m.fromPeerId, m.data);
+    });
+    node.on("peerConnected", () => void this.refresh());
+    node.on("peerDisconnected", (peerId) => {
+      this.failPending(peerId);
+      void this.refresh();
+    });
+    node.mesh?.on?.("peer:discovered", () => void this.refresh());
+  }
+  async start() {
+    await this.node.start();
+    this.timer = setInterval(() => void this.refresh(), 2e3);
+    this.timer.unref?.();
+  }
+  async close() {
+    this.closed = true;
+    if (this.timer) clearInterval(this.timer);
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+      p.resolve(null);
+    }
+    this.pending.clear();
+    await this.node.destroy().catch(() => {
+    });
+  }
+  on(listener) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  /** Keep this room: link to its closest servers, and hear of changes to it. */
+  keep(room) {
+    if (!this.rooms.has(room)) this.rooms.set(room, []);
+    void this.refresh();
+  }
+  /** The linked servers that keep this room, closest first. */
+  serversFor(room) {
+    return this.rooms.get(room) ?? [];
+  }
+  /** Every server listed in the servers' scope. */
+  async knownServers() {
+    const ids = /* @__PURE__ */ new Set();
+    for (const id of [...this.node.getDiscoveredPeers(), ...this.node.getConnectedPeers()]) {
+      if (this.node.getPeerRole(id) === STORAGE_SERVER_ROLE) ids.add(id);
+    }
+    for (const id of ids) if (!this.hashed.has(id)) this.hashed.set(id, await sha256Hex(id));
+    return [...ids];
+  }
+  /** Looks again at the servers; one asked for while a look is under way runs after it. */
+  refresh() {
+    if (this.refreshing) {
+      this.refreshAgain = true;
+      return this.refreshing;
+    }
+    return this.refreshing = (async () => {
+      do {
+        this.refreshAgain = false;
+        await this.refreshNow().catch(() => {
+        });
+      } while (this.refreshAgain && !this.closed);
+    })().finally(() => {
+      this.refreshing = null;
+    });
+  }
+  async refreshNow() {
+    if (this.closed) return;
+    const known = await this.knownServers();
+    const linked = new Set(this.node.getConnectedPeers());
+    const wanted = /* @__PURE__ */ new Set();
+    for (const [room, before] of this.rooms) {
+      const closest = closestIds(room, known, this.hashed);
+      for (const id of closest) {
+        wanted.add(id);
+        if (!linked.has(id)) this.node.connectToPeer(id);
+      }
+      const now = closest.filter((id) => linked.has(id));
+      const fresh = now.filter((id) => !before.includes(id));
+      this.rooms.set(room, now);
+      for (const id of fresh) this.send(id, { pp: PP, t: "watch", room });
+      if (fresh.length || now.length !== before.length) this.emit({ type: "servers", room, servers: now });
+    }
+  }
+  emit(event) {
+    for (const l of this.listeners) {
+      try {
+        l(event);
+      } catch {
+      }
+    }
+  }
+  send(peerId, msg) {
+    if (this.node.sendDirect(peerId, msg) !== null) return true;
+    void sendLater(this.node, peerId, msg);
+    return true;
+  }
+  ask(peerId, msg, timeoutMs = REQUEST_TIMEOUT_MS, bytes) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(msg.req);
+        this.listings.delete(msg.req);
+        resolve(null);
+      }, timeoutMs);
+      this.pending.set(msg.req, { resolve, timer, from: peerId });
+      if (bytes) {
+        void sendBytesSoon(this.node, peerId, msg, bytes).then((ok) => {
+          if (!ok) this.send(peerId, { ...msg, d: toB64(bytes) });
+        });
+        return;
+      }
+      if (!this.send(peerId, msg)) {
+        clearTimeout(timer);
+        this.pending.delete(msg.req);
+        resolve(null);
+      }
+    });
+  }
+  failPending(peerId) {
+    for (const [req, p] of this.pending) if (p.from === peerId) {
+      clearTimeout(p.timer);
+      this.pending.delete(req);
+      this.listings.delete(req);
+      p.resolve(null);
+    }
+  }
+  onMessage(from, data) {
+    if (!isMsg(data)) return;
+    if (data.t === "changed") {
+      if (validRecord(data.rec)) this.emit({ type: "changed", rec: data.rec });
+      return;
+    }
+    if (data.t === "listed") {
+      const got = this.listings.get(data.req) ?? [];
+      got.push(...Array.isArray(data.recs) ? data.recs.filter(validRecord) : []);
+      if (data.more) {
+        this.listings.set(data.req, got);
+        return;
+      }
+      this.listings.delete(data.req);
+      const p = this.pending.get(data.req);
+      if (p && p.from === from) {
+        clearTimeout(p.timer);
+        this.pending.delete(data.req);
+        p.resolve({ ...data, recs: got });
+      }
+      return;
+    }
+    if (data.t === "ack" || data.t === "got" || data.t === "back" || data.t === "bgot") {
+      if ("bytes" in data && data.bytes instanceof Uint8Array) this.readsBytes.add(from);
+      const p = this.pending.get(data.req);
+      if (p && p.from === from) {
+        clearTimeout(p.timer);
+        this.pending.delete(data.req);
+        p.resolve(data);
+      }
+    }
+  }
+  /** Writes a record to the room's servers; resolves with how many took it. */
+  async put(rec, write) {
+    const servers = this.serversFor(rec.room);
+    const acks = await Promise.all(servers.map((id) => this.ask(id, { pp: PP, t: "put", req: newReq(), rec, write })));
+    return acks.filter((a) => a?.t === "ack" && a.ok).length;
+  }
+  /** The newest copy of a record the room's servers hold, or null. */
+  async get(room, slot) {
+    const answers = await Promise.all(this.serversFor(room).map((id) => this.ask(id, { pp: PP, t: "get", req: newReq(), room, slot })));
+    let best = null;
+    for (const a of answers) if (a?.t === "got" && a.rec && validRecord(a.rec) && a.rec.slot === slot && (!best || a.rec.at > best.at)) best = a.rec;
+    return best;
+  }
+  /** The servers closest to a blob's address, linked (waits up to `waitMs` for new links). */
+  async serversForBlob(address, waitMs = 4e3) {
+    const closest = closestIds(address, await this.knownServers(), this.hashed);
+    const linked = () => closest.filter((id) => this.node.getConnectedPeers().includes(id));
+    for (const id of closest) if (!this.node.getConnectedPeers().includes(id)) this.node.connectToPeer(id);
+    const until = Date.now() + waitMs;
+    while (!linked().length && closest.length && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+    return linked();
+  }
+  /** Whether any server is known in the scope (linked or not). */
+  async hasServers() {
+    return (await this.knownServers()).length > 0;
+  }
+  /** Keeps content on the servers closest to it; resolves with how many took it. */
+  async putBlob(bytes) {
+    if (bytes.length > MAX_BLOB_BYTES) throw new Error(`a blob is at most ${MAX_BLOB_BYTES} bytes`);
+    const { address, sealed } = await sealBlob(bytes);
+    let d = null;
+    const acks = await Promise.all((await this.serversForBlob(address)).map((id) => {
+      const req = newReq();
+      if (this.readsBytes.has(id)) return this.ask(id, { pp: PP, t: "bput", req, addr: address }, BLOB_TIMEOUT_MS, sealed);
+      return this.ask(id, { pp: PP, t: "bput", req, addr: address, d: d ?? (d = toB64(sealed)) }, BLOB_TIMEOUT_MS);
+    }));
+    return acks.filter((a) => a?.t === "back" && a.ok).length;
+  }
+  /** Content by its SHA-256 from the servers, checked; null if none has it. */
+  async getBlob(hash) {
+    const address = await blobAddress(hash);
+    for (const id of await this.serversForBlob(address)) {
+      const a = await this.ask(id, { pp: PP, t: "bget", req: newReq(), addr: address, bin: 1 }, BLOB_TIMEOUT_MS);
+      const sealed = a?.t !== "bgot" ? null : a.bytes instanceof Uint8Array ? a.bytes : typeof a.d === "string" ? fromB64(a.d) : null;
+      if (sealed) {
+        const bytes = await openBlob(hash, sealed);
+        if (bytes) return bytes;
+      }
+    }
+    return null;
+  }
+  /** Every record the room's servers hold (of one space, with `tag`), the newest copy of each. */
+  async list(room, tag) {
+    const answers = await Promise.all(this.serversFor(room).map((id) => {
+      const req = newReq();
+      this.listings.set(req, []);
+      return this.ask(id, { pp: PP, t: "list", req, room, ...tag ? { tag } : {} });
+    }));
+    const best = /* @__PURE__ */ new Map();
+    for (const a of answers) {
+      if (a?.t !== "listed") continue;
+      for (const r of a.recs) if (r.room === room && (!tag || r.tag === tag) && (best.get(r.slot)?.at ?? -1) < r.at) best.set(r.slot, r);
+    }
+    return [...best.values()];
+  }
+};
+var MemoryServerRecordStore = class {
+  constructor() {
+    this.byRoom = /* @__PURE__ */ new Map();
+    this.blobMap = /* @__PURE__ */ new Map();
+  }
+  async get(room, slot) {
+    return this.byRoom.get(room)?.get(slot) ?? null;
+  }
+  async put(rec) {
+    let m = this.byRoom.get(rec.room);
+    if (!m) this.byRoom.set(rec.room, m = /* @__PURE__ */ new Map());
+    m.set(rec.slot, rec);
+  }
+  async list(room, tag) {
+    return [...this.byRoom.get(room)?.values() ?? []].filter((r) => !tag || r.tag === tag);
+  }
+  async rooms() {
+    return [...this.byRoom.keys()];
+  }
+  async getBlob(address) {
+    return this.blobMap.get(address) ?? null;
+  }
+  async putBlob(address, sealed) {
+    this.blobMap.set(address, sealed);
+  }
+  async blobs() {
+    return [...this.blobMap.keys()];
+  }
+  async blobUsage() {
+    let bytes = 0;
+    for (const b of this.blobMap.values()) bytes += b.length;
+    return { count: this.blobMap.size, bytes };
+  }
+};
+var StorageServer = class {
+  constructor(node, store = new MemoryServerRecordStore()) {
+    this.node = node;
+    this.store = store;
+    this.hashed = /* @__PURE__ */ new Map();
+    this.watchers = /* @__PURE__ */ new Map();
+    /** For each room: the servers last given its records. */
+    this.placed = /* @__PURE__ */ new Map();
+    /** For each blob: the servers last given it. */
+    this.placedBlobs = /* @__PURE__ */ new Map();
+    this.selfHash = "";
+    this.timer = null;
+    this.onChange = null;
+    this.rebalancing = null;
+    this.rebalanceAgain = false;
+    node.on("message", (m) => {
+      if (m.kind === "direct" && m.fromPeerId) void this.onMessage(m.fromPeerId, m.data).catch(() => {
+      });
+    });
+    node.on("peerConnected", () => void this.rebalance());
+    node.on("peerDisconnected", (peerId) => {
+      for (const w of this.watchers.values()) w.delete(peerId);
+      void this.rebalance();
+    });
+    node.mesh?.on?.("peer:discovered", () => void this.rebalance());
+  }
+  /** Called with each record this server takes (a write, or one handed to it). */
+  onRecord(listener) {
+    this.onChange = listener;
+  }
+  async start() {
+    await this.node.start();
+    this.timer = setInterval(() => void this.rebalance(), 1e4);
+    this.timer.unref?.();
+  }
+  async close() {
+    if (this.timer) clearInterval(this.timer);
+    await this.node.destroy().catch(() => {
+    });
+  }
+  async stats() {
+    const rooms = await this.store.rooms();
+    let records = 0;
+    for (const room of rooms) records += (await this.store.list(room)).length;
+    const linked = this.node.getConnectedPeers();
+    const servers = linked.filter((id) => this.node.getPeerRole(id) === STORAGE_SERVER_ROLE).length;
+    const b = await this.store.blobUsage?.() ?? { count: 0, bytes: 0 };
+    return { rooms: rooms.length, records, blobs: b.count, blobBytes: b.bytes, servers, clients: linked.length - servers };
+  }
+  async self() {
+    const id = this.node.getClientId() ?? "";
+    if (id && !this.hashed.has(id)) this.hashed.set(id, await sha256Hex(id));
+    this.selfHash = this.hashed.get(id) ?? "";
+    return id;
+  }
+  /** Every server known in the scope, this one included. */
+  async servers() {
+    const ids = /* @__PURE__ */ new Set();
+    const selfId = await this.self();
+    if (selfId) ids.add(selfId);
+    for (const id of [...this.node.getDiscoveredPeers(), ...this.node.getConnectedPeers()]) {
+      if (this.node.getPeerRole(id) === STORAGE_SERVER_ROLE) ids.add(id);
+    }
+    for (const id of ids) if (!this.hashed.has(id)) this.hashed.set(id, await sha256Hex(id));
+    return [...ids];
+  }
+  send(peerId, msg) {
+    if (this.node.sendDirect(peerId, msg) !== null) return true;
+    void sendLater(this.node, peerId, msg);
+    return true;
+  }
+  /** Takes a record if it is new or newer, and its write token (or hash) is the slot's. */
+  async take(rec) {
+    if (!await ownerSigned(rec)) return { ok: false, why: "bad-signature" };
+    if (rec.room.startsWith("o") && (typeof rec.owner !== "string" || await ownedRoomOf(rec.owner) !== rec.room)) return { ok: false, why: "not-owner" };
+    const have = await this.store.get(rec.room, rec.slot);
+    if (have) {
+      if (have.wh !== rec.wh) return { ok: false, why: "not-yours" };
+      if (have.owner !== void 0 && have.owner !== rec.owner) return { ok: false, why: "not-owner" };
+      if (have.once) return { ok: have.at === rec.at, ...have.at === rec.at ? {} : { why: "frozen" } };
+      if (have.at >= rec.at) return { ok: true };
+    }
+    await this.store.put(rec);
+    this.onChange?.(rec);
+    return { ok: true };
+  }
+  async onMessage(from, data) {
+    if (!isMsg(data)) return;
+    switch (data.t) {
+      case "put": {
+        if (!validRecord(data.rec) || !validId(data.write)) return void this.send(from, { pp: PP, t: "ack", req: data.req, ok: false, why: "bad" });
+        const rec = {
+          room: data.rec.room,
+          slot: data.rec.slot,
+          tag: data.rec.tag,
+          at: data.rec.at,
+          blob: data.rec.blob,
+          wh: await sha256Hex(data.write),
+          ...data.rec.once ? { once: true } : {},
+          ...typeof data.rec.owner === "string" ? { owner: data.rec.owner, osig: String(data.rec.osig ?? "") } : {}
+        };
+        const before = await this.store.get(rec.room, rec.slot);
+        const result = await this.take(rec);
+        this.send(from, { pp: PP, t: "ack", req: data.req, ...result, at: rec.at });
+        if (result.ok && (!before || before.at < rec.at)) {
+          for (const peer of this.watchers.get(rec.room) ?? []) if (peer !== from) this.send(peer, { pp: PP, t: "changed", rec: strip(rec) });
+          const closest = closestIds(rec.room, await this.servers(), this.hashed).filter((id) => id !== this.node.getClientId());
+          for (const id of closest) this.send(id, { pp: PP, t: "sync", recs: [rec] });
+        }
+        return;
+      }
+      case "get": {
+        const rec = validRoom(data.room) && validId(data.slot) ? await this.store.get(data.room, data.slot) : null;
+        this.send(from, { pp: PP, t: "got", req: data.req, rec: rec ? strip(rec) : null });
+        return;
+      }
+      case "list": {
+        const recs = validRoom(data.room) ? (await this.store.list(data.room, typeof data.tag === "string" ? data.tag : void 0)).map(strip) : [];
+        const parts = batches(recs);
+        if (!parts.length) parts.push([]);
+        parts.forEach((part, i) => this.send(from, { pp: PP, t: "listed", req: data.req, recs: part, more: i < parts.length - 1 }));
+        return;
+      }
+      case "watch": {
+        if (!validRoom(data.room)) return;
+        let w = this.watchers.get(data.room);
+        if (!w) this.watchers.set(data.room, w = /* @__PURE__ */ new Set());
+        w.add(from);
+        return;
+      }
+      case "bput": {
+        const sealed = data.bytes instanceof Uint8Array ? data.bytes : typeof data.d === "string" && data.d.length <= Math.ceil(MAX_BLOB_BYTES / 3) * 4 + 64 ? fromB64(data.d) : null;
+        const ok = !!this.store.putBlob && validId(data.addr) && !!sealed && sealed.length <= MAX_BLOB_BYTES + 64;
+        if (ok) {
+          const have = await this.store.getBlob(data.addr);
+          if (!have) {
+            await this.store.putBlob(data.addr, sealed);
+            if (this.node.getPeerRole(from) !== STORAGE_SERVER_ROLE) {
+              const selfId = this.node.getClientId();
+              for (const id of closestIds(data.addr, await this.servers(), this.hashed)) {
+                if (id !== selfId && id !== from && this.node.getConnectedPeers().includes(id)) this.send(id, { pp: PP, t: "bput", addr: data.addr, d: typeof data.d === "string" ? data.d : toB64(sealed) });
+              }
+            }
+          }
+        }
+        if (data.req) this.send(from, { pp: PP, t: "back", req: data.req, ok });
+        return;
+      }
+      case "bget": {
+        const sealed = validId(data.addr) && this.store.getBlob ? await this.store.getBlob(data.addr) : null;
+        if (sealed && data.bin && await sendBytesSoon(this.node, from, { pp: PP, t: "bgot", req: data.req }, sealed)) return;
+        this.send(from, { pp: PP, t: "bgot", req: data.req, d: sealed ? toB64(sealed) : null });
+        return;
+      }
+      case "sync": {
+        if (this.node.getPeerRole(from) !== STORAGE_SERVER_ROLE || !Array.isArray(data.recs)) return;
+        for (const rec of data.recs) {
+          if (!validRecord(rec) || !validId(rec.wh)) continue;
+          const before = await this.store.get(rec.room, rec.slot);
+          const result = await this.take(rec);
+          if (result.ok && (!before || before.at < rec.at)) {
+            for (const peer of this.watchers.get(rec.room) ?? []) this.send(peer, { pp: PP, t: "changed", rec: strip(rec) });
+          }
+        }
+        return;
+      }
+    }
+  }
+  rebalance() {
+    if (this.rebalancing) {
+      this.rebalanceAgain = true;
+      return this.rebalancing;
+    }
+    return this.rebalancing = (async () => {
+      do {
+        this.rebalanceAgain = false;
+        await this.rebalanceNow().catch(() => {
+        });
+      } while (this.rebalanceAgain);
+    })().finally(() => {
+      this.rebalancing = null;
+    });
+  }
+  /**
+   * Hands each room's records to the servers now closest to it that were not
+   * given them yet: a server that joins gets the rooms it is now closest for,
+   * and when one leaves, the next closest gets its rooms.
+   */
+  async rebalanceNow() {
+    const servers = await this.servers();
+    const selfId = this.node.getClientId();
+    const linked = new Set(this.node.getConnectedPeers());
+    for (const room of await this.store.rooms()) {
+      const closest = closestIds(room, servers, this.hashed).filter((id) => id !== selfId);
+      const given = this.placed.get(room) ?? [];
+      const todo = closest.filter((id) => !given.includes(id));
+      if (!todo.length) continue;
+      const recs = await this.store.list(room);
+      const done = [];
+      for (const id of todo) {
+        if (!linked.has(id)) {
+          this.node.connectToPeer(id);
+          continue;
+        }
+        for (const part of batches(recs)) this.send(id, { pp: PP, t: "sync", recs: part });
+        done.push(id);
+      }
+      this.placed.set(room, [...given.filter((id) => closest.includes(id)), ...done]);
+    }
+    if (this.store.blobs && this.store.getBlob) {
+      for (const addr of await this.store.blobs()) {
+        const closest = closestIds(addr, servers, this.hashed).filter((id) => id !== selfId);
+        const given = this.placedBlobs.get(addr) ?? [];
+        const todo = closest.filter((id) => !given.includes(id) && linked.has(id));
+        if (!todo.length) continue;
+        const sealed = await this.store.getBlob(addr);
+        if (!sealed) continue;
+        const d = toB64(sealed);
+        for (const id of todo) this.send(id, { pp: PP, t: "bput", addr, d });
+        this.placedBlobs.set(addr, [...given.filter((id) => closest.includes(id)), ...todo]);
+      }
+    }
+  }
+};
+
+// src/storage.ts
 var MemoryStorageDriver = class {
   constructor() {
     this.map = /* @__PURE__ */ new Map();
@@ -3232,6 +3869,9 @@ var RETRIEVE_FIRST_WAIT_MS = 1500;
 var RETRIEVE_MIN_WAIT_MS = 600;
 var DIGEST_MAX_ENTRIES = 4e3;
 var DIGEST_MAX_PUSHES = 1e3;
+var DIGEST_SEND_ATTEMPTS = 6;
+var DIGEST_RETRY_MS = 500;
+var REPLICATED_SPACES = ["public", "user"];
 var PeerPigeonStorage = class {
   constructor(options) {
     this.storeName = "records";
@@ -3244,6 +3884,14 @@ var PeerPigeonStorage = class {
     this.retrieveAnswerTimes = [];
     this.pendingRetrieveRequests = /* @__PURE__ */ new Map();
     this.closed = false;
+    // Storage servers, when there are any (see storage-servers.ts).
+    this.servers = null;
+    this.serverIds = null;
+    this.serversReady = false;
+    // Settles when the room's servers are first linked, or when the wait for them runs out.
+    this.serversWait = null;
+    this.serversWaitDone = null;
+    this.migrating = null;
     this.instanceId = `storage-${Math.random().toString(36).slice(2, 11)}`;
     this.crossTabChannel = null;
     this.crossTabSeenNoticeIds = /* @__PURE__ */ new Set();
@@ -3258,6 +3906,12 @@ var PeerPigeonStorage = class {
     this.syncSecret = String(options.syncSecret ?? "").trim();
     this.dbName = String(options.dbName ?? "peerpigeon-storage-v1").trim() || "peerpigeon-storage-v1";
     this.syncFilter = typeof options.syncFilter === "function" ? options.syncFilter : null;
+    this.replicate = (Array.isArray(options.replicate) ? options.replicate : []).map((p) => String(p)).filter(Boolean);
+    this.moveToServers = options.moveToServers !== false;
+    this.serverWaitMs = Math.max(0, Number(options.serverWaitMs ?? 8e3));
+    this.owner = String(options.owner ?? "").trim() || null;
+    this.signingKeys = options.signingKeys?.pub && options.signingKeys?.priv ? { pub: options.signingKeys.pub, priv: options.signingKeys.priv } : null;
+    this.ownSigningKeys = this.signingKeys;
     this.onGossipMessageBound = (data) => {
       this.handleGossipMessage(data).catch(() => {
       });
@@ -3335,10 +3989,15 @@ var PeerPigeonStorage = class {
     this.listeners.delete(listener);
   }
   async put(space, key, value, options = {}) {
+    if (this.owner && this.signingKeys?.pub !== this.owner) throw new Error("Only its owner writes to this room");
+    if ((space === "user" || space === "frozen") && !await this.requireDriver().get(this.makePk(space, key)) && await this.serversLinked()) {
+      await this.readFromServers(space, key);
+    }
     const mutation = await this.applyLocalUpsert(space, key, value, options, false);
     if (space !== "private" && !options.silent) {
       await this.broadcastMutation(mutation);
     }
+    if (space !== "private") void this.pushToServers(mutation);
     return await this.get(space, key);
   }
   async putSystem(space, key, value, options = {}) {
@@ -3347,12 +4006,16 @@ var PeerPigeonStorage = class {
     }
     const mutation = await this.applyLocalUpsert(space, key, value, options, true);
     await this.broadcastMutation(mutation);
+    void this.pushToServers(mutation);
     return await this.get(space, key);
   }
   async get(space, key) {
     const driver = this.requireDriver();
     const pk = this.makePk(space, key);
-    const persisted = await driver.get(pk);
+    let persisted = await driver.get(pk);
+    if (!persisted && space !== "private" && await this.serversLinked()) {
+      if (await this.readFromServers(space, this.normalizeKey(key))) persisted = await driver.get(pk);
+    }
     if (!persisted) return null;
     let value;
     try {
@@ -3367,6 +4030,7 @@ var PeerPigeonStorage = class {
       value,
       ownerId: persisted.ownerId,
       modifiedBy: persisted.modifiedBy ?? null,
+      signer: persisted.signer ?? null,
       createdAt: persisted.createdAt,
       updatedAt: persisted.updatedAt,
       version: this.normalizeStorageVersion(persisted.version, this.versionSourceToken(persisted.ownerId ?? this.userId))
@@ -3436,10 +4100,12 @@ var PeerPigeonStorage = class {
     if (this.retrieveAnswerTimes.length > 8) this.retrieveAnswerTimes.shift();
   }
   async delete(space, key) {
+    if (this.owner && this.signingKeys?.pub !== this.owner) throw new Error("Only its owner writes to this room");
     const mutation = await this.applyLocalDelete(space, key, false);
     if (!mutation) return false;
     if (space !== "private") {
       await this.broadcastMutation(mutation);
+      void this.pushToServers(mutation);
     }
     return true;
   }
@@ -3450,11 +4116,16 @@ var PeerPigeonStorage = class {
     const mutation = await this.applyLocalDelete(space, key, true);
     if (!mutation) return false;
     await this.broadcastMutation(mutation);
+    void this.pushToServers(mutation);
     return true;
   }
   async list(space) {
     const driver = this.requireDriver();
     const persisted = await driver.listBySpace(space);
+    if (space !== "private" && await this.serversLinked()) {
+      const here = new Set(persisted.map((r) => r.key));
+      for (const record of await this.listFromServers(space)) if (!here.has(record.key)) persisted.push(record);
+    }
     const out = [];
     for (const record of persisted) {
       let value;
@@ -3470,6 +4141,7 @@ var PeerPigeonStorage = class {
         value,
         ownerId: record.ownerId,
         modifiedBy: record.modifiedBy ?? null,
+        signer: record.signer ?? null,
         createdAt: record.createdAt,
         updatedAt: record.updatedAt,
         version: this.normalizeStorageVersion(record.version, this.versionSourceToken(record.ownerId ?? this.userId))
@@ -3481,6 +4153,9 @@ var PeerPigeonStorage = class {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    this.servers = null;
+    this.serversReady = false;
+    this.serversWaitDone?.();
     if (this.gossip) {
       this.gossip.off("messageReceived", this.onGossipMessageBound);
       this.gossip.off("directMessageReceived", this.onDirectMessageBound);
@@ -3498,14 +4173,225 @@ var PeerPigeonStorage = class {
     }
     this.pendingRetrieveRequests.clear();
   }
+  // ---------------------------------------------------------------- signing
+  /** Who this node acts as in a space: its signing key when it signs (a user record's owner), else its user id. */
+  actorFor(space) {
+    return this.signingKeys && space !== "private" ? this.signingKeys.pub : this.userId;
+  }
+  /** The id records this node owns carry: its signing key when it signs, else its user id. */
+  ownerIdentity() {
+    return this.signingKeys?.pub ?? this.userId;
+  }
+  /** What a signature covers: everything a record says, but where it is kept. */
+  signedText(op, r) {
+    return JSON.stringify(["pp-storage-signed-v1", op, r.space, r.key, r.ownerId ?? null, r.value ?? null, r.version, r.updatedAt]);
+  }
+  /** The key that signed a change, if its signature holds (and an upsert's time is its record's); else null. */
+  async verifiedSigner(mutation) {
+    try {
+      if (mutation.op === "delete") {
+        if (typeof mutation.signer !== "string" || typeof mutation.sig !== "string") return null;
+        const existing = await this.requireDriver().get(this.makePk(mutation.space, mutation.key));
+        const text = this.signedText("delete", { space: mutation.space, key: mutation.key, ownerId: existing?.ownerId ?? null, value: null, version: 0, updatedAt: mutation.timestamp });
+        return await verifyMessage2(text, mutation.sig, mutation.signer) ? mutation.signer : null;
+      }
+      const r = mutation.record;
+      if (!r || typeof r.signer !== "string" || typeof r.sig !== "string") return null;
+      if (r.updatedAt !== mutation.timestamp || r.space !== mutation.space || r.key !== mutation.key) return null;
+      return await verifyMessage2(this.signedText("upsert", r), r.sig, r.signer) ? r.signer : null;
+    } catch {
+      return null;
+    }
+  }
+  // ---------------------------------------------------------------- servers
+  /**
+   * Uses storage servers (a link from storage-servers.ts) for this room: its
+   * records go to the room's closest servers, the ones already here are moved
+   * to them once they are there, and changes others make arrive from them.
+   */
+  async attachServers(link) {
+    this.expectServers();
+    const seed = `peerpigeon:storage-servers:v1:${this.sessionId}:${this.syncSecret}`;
+    const room = this.owner ? await ownedRoomOf(this.owner) : await sha256Hex(`${seed}:room`);
+    this.servers = link;
+    this.serverIds = { room, seed };
+    link.on((event) => {
+      if (this.closed || this.servers !== link) return;
+      if (event.type === "servers" && event.room === room) {
+        const ready = event.servers.length > 0;
+        const cameUp = ready && !this.serversReady;
+        this.serversReady = ready;
+        if (ready) this.serversWaitDone?.();
+        if (cameUp) void this.migrateToServers().catch(() => {
+        });
+      } else if (event.type === "changed" && event.rec.room === room) {
+        void this.applyServerRecord(event.rec, false).catch(() => {
+        });
+      }
+    });
+    link.keep(room);
+    if (link.serversFor(room).length > 0 && !this.serversReady) {
+      this.serversReady = true;
+      this.serversWaitDone?.();
+      void this.migrateToServers().catch(() => {
+      });
+    }
+  }
+  /**
+   * Sign this peer's changes as an account from now on: its keys (after the
+   * person signs in), so what they write is theirs on every device they sign
+   * in from. null goes back to the keys this storage started with (signing out).
+   */
+  signAs(keys) {
+    this.signingKeys = keys?.pub && keys?.priv ? { pub: keys.pub, priv: keys.priv } : this.ownSigningKeys;
+  }
+  /** Who signs this peer's changes now (an account's key after signAs), or null when unsigned. */
+  signer() {
+    return this.signingKeys?.pub ?? null;
+  }
+  /**
+   * Storage servers are on their way (the node is linking to them): until they
+   * are linked, or serverWaitMs has passed, a read of a record not kept here
+   * waits for them rather than finding nothing. A peer that comes back to a
+   * room where no other peer is online reads what it left on the servers.
+   */
+  expectServers() {
+    if (this.serversWait || this.serversUp()) return;
+    this.serversWait = new Promise((resolve) => {
+      const timer = setTimeout(() => done(), this.serverWaitMs);
+      const poll = setInterval(() => {
+        if (this.serversUp() || this.closed) done();
+      }, 200);
+      const done = () => {
+        clearTimeout(timer);
+        clearInterval(poll);
+        this.serversWaitDone = null;
+        resolve();
+      };
+      this.serversWaitDone = done;
+    });
+  }
+  /** Whether the room's servers are linked, after waiting for them right after joining. */
+  async serversLinked() {
+    if (!this.serversUp() && this.serversWait && !this.closed) await this.serversWait;
+    return this.serversUp();
+  }
+  /**
+   * Whether the room's servers are linked, as the link has it now. Asked each time rather than
+   * kept from the link's events, so a storage never goes on believing there are none.
+   */
+  serversUp() {
+    return !this.closed && this.serverCount() > 0;
+  }
+  /** Whether the room's servers are linked now, and how many. */
+  serverCount() {
+    return this.servers && this.serverIds ? this.servers.serversFor(this.serverIds.room).length : 0;
+  }
+  async slotOf(space, key) {
+    const seed = this.serverIds.seed;
+    const slot = await sha256Hex(`${seed}:slot:${space}:${key}`);
+    return { slot, tag: (await sha256Hex(`${seed}:space:${space}`)).slice(0, 16), write: await sha256Hex(`${seed}:write:${slot}`) };
+  }
+  /** Sends one change to the room's servers; resolves with how many took it. */
+  async pushToServers(mutation) {
+    if (!this.servers || !this.serverIds || !this.serversUp() || mutation.space === "private") return 0;
+    try {
+      const { slot, tag, write } = await this.slotOf(mutation.space, mutation.key);
+      const blob = await this.encryptSyncPayload(mutation);
+      const rec = { room: this.serverIds.room, slot, tag, at: mutation.timestamp, blob, ...mutation.space === "frozen" ? { once: true } : {} };
+      if (this.owner) {
+        const signer = mutation.op === "delete" ? mutation.signer : mutation.record?.signer;
+        if (!this.signingKeys || this.signingKeys.pub !== this.owner || signer !== this.owner) return 0;
+        rec.owner = this.owner;
+        rec.osig = await signMessage(await ownerText(rec), this.signingKeys.priv);
+      } else if (mutation.space === "user" && this.signingKeys) {
+        const signer = mutation.op === "delete" ? mutation.signer : mutation.record?.signer;
+        if (signer !== this.signingKeys.pub) return 0;
+        rec.owner = this.signingKeys.pub;
+        rec.osig = await signMessage(await ownerText(rec), this.signingKeys.priv);
+      }
+      return await this.servers.put(rec, write);
+    } catch {
+      return 0;
+    }
+  }
+  /** A record from a server: decrypted, checked like any change from the mesh, and kept here. */
+  async applyServerRecord(rec, asked) {
+    const mutation = await this.decryptSyncEnvelope(rec.blob);
+    if (!this.isStorageMutation(mutation) || mutation.space === "private") return false;
+    if (!asked && !this.shouldAcceptRemoteSync(mutation.space, mutation.key, { kind: "mutation", actorId: mutation.actorId })) return false;
+    return await this.applyRemoteMutation(mutation);
+  }
+  async readFromServers(space, key) {
+    if (!this.servers || !this.serverIds) return false;
+    try {
+      const { slot } = await this.slotOf(space, key);
+      const rec = await this.servers.get(this.serverIds.room, slot);
+      return rec ? await this.applyServerRecord(rec, true) : false;
+    } catch {
+      return false;
+    }
+  }
+  /** The records of a space the room's servers keep, decrypted (not kept here). */
+  async listFromServers(space) {
+    if (!this.servers || !this.serverIds) return [];
+    try {
+      const { tag } = await this.slotOf(space, "");
+      const out = [];
+      for (const rec of await this.servers.list(this.serverIds.room, tag)) {
+        const mutation = await this.decryptSyncEnvelope(rec.blob);
+        if (this.isStorageMutation(mutation) && mutation.op === "upsert" && mutation.record && mutation.space === space) {
+          out.push({ ...mutation.record, pk: this.makePk(space, mutation.key), updatedAt: mutation.timestamp });
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+  /**
+   * The room's servers came up: everything kept here (but private) goes to
+   * them, and, once they hold it, what this node does not use is dropped here.
+   */
+  migrateToServers() {
+    return this.migrating ?? (this.migrating = (async () => {
+      const driver = this.requireDriver();
+      for (const space of ["public", "user", "frozen", "epublic"]) {
+        for (const record of await driver.listBySpace(space)) {
+          if (this.closed || !this.serversUp()) return;
+          const mutation = {
+            __ppType: "pp-storage-op-v1",
+            opId: this.makeMutationId(this.userId),
+            op: "upsert",
+            space,
+            key: record.key,
+            // A user record is created by its owner: whoever receives it checks that.
+            actorId: space === "user" ? record.ownerId ?? this.userId : this.actorFor(space),
+            timestamp: record.updatedAt,
+            record
+          };
+          const took = await this.pushToServers(mutation);
+          if (took > 0 && this.moveToServers && !this.usesLocally(space, record.key)) {
+            await driver.delete(record.pk);
+          }
+        }
+      }
+    })().finally(() => {
+      this.migrating = null;
+    }));
+  }
+  /** Whether this node keeps a record here even when servers hold it: one it subscribes to or replicates. */
+  usesLocally(space, key) {
+    return this.isSubscribed(space, key) || (space === "public" || space === "user") && this.replicates(key);
+  }
   async applyLocalUpsert(space, key, value, options, allowSystemWrite = false) {
     const normalizedKey = this.normalizeKey(key);
-    const actorId = this.userId;
+    const actorId = this.actorFor(space);
     const driver = this.requireDriver();
     const pk = this.makePk(space, normalizedKey);
     const existing = await driver.get(pk);
     const now = Date.now();
-    this.assertCanWrite(space, existing, actorId, options.ownerId, allowSystemWrite);
+    this.assertCanWrite(space, existing, actorId, this.signingKeys ? void 0 : options.ownerId, allowSystemWrite);
     const ownerId = this.resolveOwnerId(space, existing, actorId, options.ownerId);
     const modifiedBy = this.peerId || null;
     const nextVersion = this.nextStorageVersion(existing?.version, modifiedBy || ownerId || actorId);
@@ -3522,6 +4408,10 @@ var PeerPigeonStorage = class {
       updatedAt: now,
       version: nextVersion
     };
+    if (this.signingKeys && space !== "private") {
+      persisted.signer = this.signingKeys.pub;
+      persisted.sig = await signMessage(this.signedText("upsert", persisted), this.signingKeys.priv);
+    }
     await driver.put(persisted);
     const opId = this.makeMutationId(actorId);
     const mutation = {
@@ -3565,7 +4455,7 @@ var PeerPigeonStorage = class {
   }
   async applyLocalDelete(space, key, allowSystemWrite = false) {
     const normalizedKey = this.normalizeKey(key);
-    const actorId = this.userId;
+    const actorId = this.actorFor(space);
     const driver = this.requireDriver();
     const pk = this.makePk(space, normalizedKey);
     const existing = await driver.get(pk);
@@ -3583,6 +4473,10 @@ var PeerPigeonStorage = class {
       timestamp: Date.now(),
       record: null
     };
+    if (this.signingKeys && space !== "private") {
+      mutation.signer = this.signingKeys.pub;
+      mutation.sig = await signMessage(this.signedText("delete", { space, key: normalizedKey, ownerId: existing.ownerId, value: null, version: 0, updatedAt: mutation.timestamp }), this.signingKeys.priv);
+    }
     this.emitChange({
       origin: "local",
       op: "delete",
@@ -3641,6 +4535,11 @@ var PeerPigeonStorage = class {
   async applyRemoteMutation(mutation) {
     const driver = this.requireDriver();
     const pk = this.makePk(mutation.space, mutation.key);
+    if (this.signingKeys) {
+      const signer = await this.verifiedSigner(mutation);
+      if (!signer) return false;
+      mutation = { ...mutation, actorId: signer };
+    }
     const existing = await driver.get(pk);
     if (mutation.op === "delete") {
       if (!existing) return false;
@@ -3827,6 +4726,7 @@ var PeerPigeonStorage = class {
         value,
         ownerId: persisted.ownerId,
         modifiedBy: persisted.modifiedBy ?? null,
+        signer: persisted.signer ?? null,
         createdAt: persisted.createdAt,
         updatedAt: persisted.updatedAt,
         version: persisted.version
@@ -3864,7 +4764,7 @@ var PeerPigeonStorage = class {
     this.gossip.broadcast(await this.syncEnvelope(payload));
   }
   async handleRetrieveRequest(request) {
-    if (request.actorId === this.userId) return;
+    if (this.fromSelf(request)) return;
     if (request.space === "private") return;
     const driver = this.requireDriver();
     const pk = this.makePk(request.space, request.key);
@@ -3920,7 +4820,8 @@ var PeerPigeonStorage = class {
         space: response.space,
         key: response.key,
         actorId: response.actorId,
-        timestamp: response.timestamp,
+        // The record's own time: a signed record is checked against it (the answer's time would fail that).
+        timestamp: typeof response.record.updatedAt === "number" ? response.record.updatedAt : response.timestamp,
         record: response.record
       };
       await this.applyRemoteMutation(mutation);
@@ -3963,6 +4864,7 @@ var PeerPigeonStorage = class {
     const filtered = this.syncFilterAccepts(space, key, context);
     if (filtered === false) return false;
     if (context.kind === "retrieve-request") return true;
+    if ((space === "public" || space === "user") && this.replicates(key)) return true;
     return filtered === true || this.isSubscribed(space, key);
   }
   async createDriver() {
@@ -3999,6 +4901,15 @@ var PeerPigeonStorage = class {
       return `${space}:${this.userId}:${key}`;
     }
     return `${space}:${key}`;
+  }
+  /**
+   * Whether a request or digest is this node's own. By mesh peer id when both
+   * sides have one: two tabs (or devices) of the same person share an identity,
+   * and each must still answer the other.
+   */
+  fromSelf(message) {
+    if (message.origin && this.peerId) return message.origin === this.peerId;
+    return message.actorId === this.userId;
   }
   makeMutationId(actorId) {
     return `${actorId}-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
@@ -4067,7 +4978,7 @@ var PeerPigeonStorage = class {
   resolveOwnerId(space, existing, actorId, ownerOverride) {
     if (space === "user") {
       if (existing?.ownerId) {
-        if (this.isPeerIdFormat(existing.ownerId) && !this.isPeerIdFormat(actorId)) {
+        if (!this.signingKeys && this.isPeerIdFormat(existing.ownerId) && !this.isPeerIdFormat(actorId)) {
           return actorId;
         }
         return existing.ownerId;
@@ -4091,7 +5002,7 @@ var PeerPigeonStorage = class {
       if (!existing) return true;
       if (existing.ownerId === actorId) return true;
       if (ownerOverride && String(ownerOverride).trim()) return true;
-      if (this.isPeerIdFormat(existing.ownerId) && !this.isPeerIdFormat(actorId)) {
+      if (!this.signingKeys && this.isPeerIdFormat(existing.ownerId) && !this.isPeerIdFormat(actorId)) {
         return true;
       }
       return false;
@@ -4168,23 +5079,39 @@ var PeerPigeonStorage = class {
     const target = String(targetPeerId ?? "").trim();
     if (!target) return;
     const entries = [];
+    const listed = /* @__PURE__ */ new Set();
     for (const [pk, { space, key }] of this.subscribedEntries) {
       if (space === "private" || space === "frozen") continue;
       const existing = await this.driver.get(pk);
       entries.push([space, key, existing?.version ?? null]);
+      listed.add(pk);
       if (entries.length >= DIGEST_MAX_ENTRIES) break;
     }
-    if (entries.length === 0 || this.closed) return;
+    for (const space of REPLICATED_SPACES) {
+      if (!this.replicate.length || entries.length >= DIGEST_MAX_ENTRIES) break;
+      for (const record of await this.driver.listBySpace(space)) {
+        if (!this.replicates(record.key) || listed.has(record.pk)) continue;
+        entries.push([space, record.key, record.version]);
+        listed.add(record.pk);
+        if (entries.length >= DIGEST_MAX_ENTRIES) break;
+      }
+    }
+    if (entries.length === 0 && !this.replicate.length || this.closed) return;
     const digest = {
       __ppType: "pp-storage-digest-v1",
       actorId: this.userId,
       timestamp: Date.now(),
       ...this.peerId ? { origin: this.peerId } : {},
-      entries
+      entries,
+      ...this.replicate.length ? { prefixes: this.replicate } : {}
     };
-    try {
-      this.gossip.sendDirect(target, await this.syncEnvelope(digest));
-    } catch {
+    const envelope = await this.syncEnvelope(digest);
+    for (let attempt = 0; attempt < DIGEST_SEND_ATTEMPTS && !this.closed; attempt++) {
+      try {
+        if (this.gossip.sendDirect(target, envelope)) return;
+      } catch {
+      }
+      await new Promise((resolve) => setTimeout(resolve, DIGEST_RETRY_MS));
     }
   }
   /**
@@ -4193,7 +5120,7 @@ var PeerPigeonStorage = class {
    * the neighbour holds newer than ours.
    */
   async handleDigest(digest, fromPeerId) {
-    if (digest.actorId === this.userId) return;
+    if (this.fromSelf(digest)) return;
     const target = typeof digest.origin === "string" && digest.origin.trim() || String(fromPeerId ?? "").trim();
     if (!target || !this.gossip?.sendDirect) return;
     const driver = this.requireDriver();
@@ -4244,6 +5171,37 @@ var PeerPigeonStorage = class {
       } catch {
       }
     }
+    const prefixes = Array.isArray(digest.prefixes) ? digest.prefixes.filter((p) => typeof p === "string" && p.length > 0).slice(0, 32) : [];
+    if (!prefixes.length) return;
+    const theirs = /* @__PURE__ */ new Set();
+    for (const entry of digest.entries.slice(0, DIGEST_MAX_ENTRIES)) {
+      if (Array.isArray(entry) && typeof entry[1] === "string") theirs.add(this.makePk(entry[0], entry[1].trim()));
+    }
+    for (const space of REPLICATED_SPACES) {
+      for (const record of await driver.listBySpace(space)) {
+        if (this.closed || pushed >= DIGEST_MAX_PUSHES) return;
+        if (theirs.has(record.pk) || !prefixes.some((p) => record.key.startsWith(p))) continue;
+        pushed += 1;
+        const mutation = {
+          __ppType: "pp-storage-op-v1",
+          opId: `digest-${this.makeMutationId(this.userId)}`,
+          op: "upsert",
+          space,
+          key: record.key,
+          actorId: this.userId,
+          timestamp: record.updatedAt,
+          record
+        };
+        try {
+          this.gossip.sendDirect(target, await this.syncEnvelope(mutation));
+        } catch {
+        }
+      }
+    }
+  }
+  /** Whether this node replicates a key in full (a `replicate` prefix). */
+  replicates(key) {
+    return this.replicate.some((p) => key.startsWith(p));
   }
   isCrossTabNotice(value) {
     const maybe = value;
@@ -4384,7 +5342,7 @@ var PeerPigeonCryptoProtocol = class {
       roomId,
       roomSecret: String(options.roomSecret ?? ""),
       keyPair: options.keyPair,
-      persistKeyPair: options.persistKeyPair ?? true,
+      persistKeyPair: options.persistKeyPair === void 0 || options.persistKeyPair === true ? "local" : options.persistKeyPair,
       storageKey: String(options.storageKey ?? "peerpigeon:crypto-keys:v1"),
       announceIntervalMs: options.announceIntervalMs ?? 1e4,
       keyDiscoveryTimeoutMs: options.keyDiscoveryTimeoutMs ?? 8e3
@@ -4559,22 +5517,37 @@ var PeerPigeonCryptoProtocol = class {
       throw new Error("Invalid PeerPigeon key pair");
     }
   }
+  keyStores() {
+    const mode = this.options.persistKeyPair;
+    if (!mode) return [];
+    const pick = (name) => {
+      try {
+        return globalThis[name] ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const local = pick("localStorage"), session = pick("sessionStorage");
+    return (mode === "local" ? [local, session] : [session]).filter((s) => !!s);
+  }
   loadStoredKeyPair() {
-    if (!this.options.persistKeyPair) return null;
-    try {
-      const raw = globalThis.sessionStorage?.getItem(`${this.options.storageKey}:${this.options.roomId}`);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      this.validateKeyPair(parsed);
-      return parsed;
-    } catch {
-      return null;
+    for (const store of this.keyStores()) {
+      try {
+        const raw = store.getItem(`${this.options.storageKey}:${this.options.roomId}`);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        this.validateKeyPair(parsed);
+        return parsed;
+      } catch {
+      }
     }
+    return null;
   }
   persistKeyPair(value) {
-    if (!this.options.persistKeyPair) return;
+    const store = this.keyStores()[0];
+    if (!store) return;
     try {
-      globalThis.sessionStorage?.setItem(`${this.options.storageKey}:${this.options.roomId}`, JSON.stringify(value));
+      store.setItem(`${this.options.storageKey}:${this.options.roomId}`, JSON.stringify(value));
     } catch {
     }
   }
@@ -4841,9 +5814,26 @@ async function selectClosestSignalingServer(peerId, relayUrls) {
   if (ranked.length === 0) throw new Error("No valid FreeRTC relays are available");
   return ranked[0];
 }
+var directRelayNames = /* @__PURE__ */ new Map();
+function noteRelayName(url, record) {
+  if (url && typeof record?.name === "string" && record.name) directRelayNames.set(url, record.name);
+  return url;
+}
+function relayDisplayName(url) {
+  if (!url) return "";
+  const named = directRelayNames.get(canonicalSignalingUrl(url) ?? url) ?? directRelayNames.get(url);
+  const shown = named || url;
+  try {
+    const u = new URL(shown.replace(/^webrtc-direct:/, "https:"));
+    const usual = Boolean(named) || !u.port || u.port === "443" || u.port === "80";
+    return usual ? u.hostname : `${u.hostname}:${u.port}`;
+  } catch {
+    return shown;
+  }
+}
 async function discoverSignalingRelays(options) {
   const directLookup = options.directory === false || !directRelaySupported() ? Promise.resolve([]) : lookupDirectRelays({ name: options.directory || DEFAULT_DIRECTORY_NAME, fetchImpl: options.fetchImpl }).then((records) => records.map((record) => ({
-    url: canonicalSignalingUrl(directoryRecordUrl(record)),
+    url: noteRelayName(canonicalSignalingUrl(directoryRecordUrl(record)), record),
     nodeId: record.node_id,
     kind: "local",
     connections: 0,
@@ -5019,6 +6009,28 @@ async function discoverClosestSignalingServer(options) {
   if (ranked.length === 0) throw new Error("No valid FreeRTC relays are available");
   return ranked[0];
 }
+var BYTES_MAGIC = [80, 80, 66, 49];
+function encodeBytesFrame(meta, bytes) {
+  const m = new TextEncoder().encode(JSON.stringify(meta));
+  const out = new Uint8Array(8 + m.length + bytes.length);
+  out.set(BYTES_MAGIC, 0);
+  new DataView(out.buffer).setUint32(4, m.length);
+  out.set(m, 8);
+  out.set(bytes, 8 + m.length);
+  return out;
+}
+function decodeBytesFrame(frame) {
+  if (frame.length < 8 || BYTES_MAGIC.some((b, i) => frame[i] !== b)) return null;
+  const n = new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(4);
+  if (8 + n > frame.length) return null;
+  try {
+    const meta = JSON.parse(new TextDecoder().decode(frame.subarray(8, 8 + n)));
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+    return { meta, bytes: frame.subarray(8 + n) };
+  } catch {
+    return null;
+  }
+}
 var PartialMesh = class {
   constructor(config = {}) {
     this.peers = /* @__PURE__ */ new Map();
@@ -5108,6 +6120,8 @@ var PartialMesh = class {
     const bootstrapServer = String(config.signalingServer || DEFAULT_SIGNALING_SERVERS[0]).trim();
     const configuredSignalingServers = Array.from(new Set((config.signalingServers != null ? [bootstrapServer, ...config.signalingServers] : automaticSignalingServer ? DEFAULT_SIGNALING_SERVERS : [bootstrapServer]).map((url) => String(url || "").trim()).filter(Boolean)));
     const signalingServers = configuredSignalingServers.length > 0 ? configuredSignalingServers : [...DEFAULT_SIGNALING_SERVERS];
+    this.role = typeof config.role === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(config.role) ? config.role : null;
+    this.dialRoles = Array.isArray(config.dialRoles) ? new Set(config.dialRoles.map(String)) : null;
     this.config = {
       minPeers: config.minPeers ?? 2,
       maxPeers: config.maxPeers ?? 10,
@@ -5159,6 +6173,7 @@ var PartialMesh = class {
       "peer:connected",
       "peer:disconnected",
       "peer:data",
+      "peer:bytes",
       "peer:error",
       "peer:discovered",
       "mesh:ready",
@@ -5603,6 +6618,7 @@ var PartialMesh = class {
       });
       for (const record of records.slice(0, 2)) {
         const url = canonicalSignalingUrl(directoryRecordUrl(record));
+        if (url) noteRelayName(url, record);
         if (!url) continue;
         try {
           const { pc } = await directRelayChannel(url, { timeoutMs: 5e3 });
@@ -5920,6 +6936,7 @@ var PartialMesh = class {
       retiredPeerIds,
       iceServers: this.config.iceServers,
       trickleIce: this.config.trickleIce,
+      role: this.role,
       // Stay reachable on the relay while a coordinate neighbour is not yet
       // linked. That neighbour may sit in another part of the mesh, where
       // only the relay can carry the offer; both ends hold until it forms.
@@ -6106,6 +7123,11 @@ var PartialMesh = class {
       this.emit("signaling:log", { message: `[signal] ${peerId.slice(0, 12)} is on no relay: no longer dialling it` });
     });
     this.signalingClient.on("rtc:data", (data) => {
+      if (data.data instanceof Uint8Array) {
+        const decoded = decodeBytesFrame(data.data);
+        if (decoded) this.emit("peer:bytes", { peerId: data.peerId, meta: decoded.meta, bytes: decoded.bytes });
+        return;
+      }
       const msg = this.tryParseMembership(data.data);
       if (msg) {
         this.mergeMembership(msg.peers, msg.retiredPeers, msg.capacities, msg.topology, data.peerId, msg.records);
@@ -6516,8 +7538,18 @@ var PartialMesh = class {
       }
     }
     return Array.from(candidates).filter(
-      (peerId) => !this.isSelfAlias(peerId) && !this.retiredPeerIds.has(peerId) && !this.hasLeft(peerId)
+      (peerId) => !this.isSelfAlias(peerId) && !this.retiredPeerIds.has(peerId) && !this.hasLeft(peerId) && this.dialsRole(peerId)
     );
+  }
+  /** The role a relay listed this peer with (its announce's capabilities.role), or null. */
+  getPeerRole(peerId) {
+    return this.signalingClient?.getPeerRole?.(this.normalizePeerId(peerId)) ?? null;
+  }
+  /** Whether this peer dials that one on its own (dialRoles). */
+  dialsRole(peerId) {
+    if (!this.dialRoles) return true;
+    const role = this.getPeerRole(peerId);
+    return role !== null && this.dialRoles.has(role);
   }
   maintainPeerConnections() {
     const now = Date.now();
@@ -6597,11 +7629,12 @@ var PartialMesh = class {
    * Connect to a specific peer
    */
   connectToPeer(peerId) {
-    this.connectToPeerInternal(peerId, false);
+    this.connectToPeerInternal(peerId, false, true);
   }
-  connectToPeerInternal(peerId, allowTemporaryOverflow) {
+  connectToPeerInternal(peerId, allowTemporaryOverflow, asked = false) {
     const selfId = this.normalizePeerId(this.clientId);
     const normalizedPeerId = this.normalizePeerId(peerId);
+    if (!asked && normalizedPeerId && !this.dialsRole(normalizedPeerId)) return;
     const signalingConnected = this.signalingClient?.isConnected?.() ?? true;
     const emergencyIsolated = this.getConnectedPeerCount() === 0 && this.dialCandidatePeerIds(true).length > 0;
     if (!signalingConnected && !this.meshCanSignal(peerId)) {
@@ -6640,7 +7673,7 @@ var PartialMesh = class {
     }
     const discoveredAt = this.discoveredAtMs.get(normalizedPeerId) ?? Date.now();
     const preferredInitiator = selfId.localeCompare(normalizedPeerId) < 0;
-    if (!preferredInitiator && Date.now() - discoveredAt < PREFERRED_INITIATOR_GRACE_MS) {
+    if (!asked && !preferredInitiator && Date.now() - discoveredAt < PREFERRED_INITIATOR_GRACE_MS) {
       return;
     }
     this.connecting.add(normalizedPeerId);
@@ -6702,6 +7735,20 @@ var PartialMesh = class {
       this.signalingClient.send(peerId, data);
     } else {
       throw new Error(`Peer ${peerId} is not connected`);
+    }
+  }
+  /**
+   * A message with bytes to a linked neighbour, as one binary frame (no base64, no JSON escaping):
+   * false when the peer is not linked or the frame is refused. The receiver must read them (it said so).
+   */
+  sendBytes(peerId, meta, bytes) {
+    const peerConnection = this.peers.get(peerId);
+    if (!peerConnection?.connected) return false;
+    try {
+      this.signalingClient.send(peerId, encodeBytesFrame(meta, bytes));
+      return true;
+    } catch {
+      return false;
     }
   }
   /**
@@ -6775,7 +7822,9 @@ var PartialMesh = class {
     return {
       ...this.config,
       signalingServers: [...this.config.signalingServers],
-      iceServers: this.config.iceServers ? this.config.iceServers.map((server) => ({ ...server })) : null
+      iceServers: this.config.iceServers ? this.config.iceServers.map((server) => ({ ...server })) : null,
+      role: this.role,
+      dialRoles: this.dialRoles ? [...this.dialRoles] : null
     };
   }
   /**
@@ -7433,16 +8482,23 @@ var PartialMesh = class {
 };
 var RELAY_SCORES_PAYLOAD_TYPE = "pp-relay-scores";
 var RELAY_SCORE_SHARE_MS = 10 * 6e4;
-var PeerPigeonNode = class {
+var PeerPigeonNode = class _PeerPigeonNode {
   constructor(options = {}) {
     this.storage = null;
+    this.serverLink = null;
+    this.linking = null;
+    this.storageUserId = "";
+    this.openedStorages = /* @__PURE__ */ new Set();
     this.callbacks = {};
     this.started = false;
     this.relayScoreTimer = null;
+    this.useServers = false;
     const { gossip = {}, crypto = {}, storage = false, ...meshOptions } = options;
     this.mesh = new PartialMesh(meshOptions);
     this.gossip = new GossipProtocol(this.mesh, gossip);
     this.storageOptions = storage;
+    const { signalingServer, signalingServers, automaticSignalingServer, relayDirectory, iceServers } = meshOptions;
+    this.signalingOptions = { signalingServer, signalingServers, automaticSignalingServer, relayDirectory, iceServers };
     const meshReaches = (peerId) => {
       if (!this.gossip.canRouteDirect(peerId)) return false;
       if (this.mesh.getConnectedPeers().includes(peerId)) return true;
@@ -7482,22 +8538,83 @@ var PeerPigeonNode = class {
           this.storageOptions.userId ?? (this.crypto ? this.crypto.getKeyPair().epub : "")
         ).trim();
         if (!userId) throw new Error("storage.userId is required when crypto is disabled");
-        const { userId: _ignoredUserId, ...storageOptions } = this.storageOptions;
+        const { userId: _ignoredUserId, servers: useServers = true, ...storageOptions } = this.storageOptions;
+        this.storageUserId = userId;
         const config = this.mesh.getConfig();
         this.storage = new PeerPigeonStorage({
           ...storageOptions,
           userId,
           peerId: this.mesh.getClientId() ?? "",
           sessionId: storageOptions.sessionId ?? `${config.networkId}:${config.sessionId}`,
+          // Every change this node makes is signed with its key pair, and only signed changes are taken.
+          signingKeys: storageOptions.signingKeys !== void 0 ? storageOptions.signingKeys : this.crypto ? { pub: this.crypto.getKeyPair().pub, priv: this.crypto.getKeyPair().priv } : null,
           gossip: this.gossip
         });
         await this.storage.init();
+        this.useServers = useServers;
+        if (useServers) this.storage.expectServers();
       }
       await this.mesh.init();
+      if (this.storage && this.useServers) this.linking = this.linkServers().catch(() => {
+      });
     } catch (error) {
       this.started = false;
       throw error;
     }
+  }
+  /** The relay this node is signalling through now ('' until it has one). */
+  currentRelay() {
+    const client = this.mesh.signalingClient;
+    return String(client?.currentSignalUrl ?? "");
+  }
+  /** The relay this node uses, as a person reads it (a direct relay by its name). */
+  currentRelayName() {
+    return relayDisplayName(this.currentRelay());
+  }
+  /**
+   * A storage room of its own (one person's records, say: name it after their key), kept on the
+   * same storage servers as this node's room. Listing it reads only what is in it, however much
+   * the node's room holds. Only the servers keep it: the mesh does not sync it.
+   * signingKeys: whose changes these are (an account's, after sign-in); by default this node's.
+   * owner: a key, for a room only that key writes to (the storage servers take nothing else in it);
+   * writes here must then be signed by it.
+   * Close it with storage.close() when done (the node closes those still open when it stops).
+   */
+  async openStorage(sessionId, options = {}) {
+    if (this.storageOptions === false || !this.storage) throw new Error("Storage is off, or the node has not started");
+    const name = String(sessionId ?? "").trim();
+    if (!name) throw new Error("openStorage needs a room name");
+    const { userId: _u, servers: _s, gossip: _g, sessionId: _n, dbName, signingKeys: _k, ...base } = this.storageOptions;
+    const own = this.crypto ? { pub: this.crypto.getKeyPair().pub, priv: this.crypto.getKeyPair().priv } : null;
+    const storage = new PeerPigeonStorage({
+      ...base,
+      userId: this.storageUserId,
+      peerId: this.mesh.getClientId() ?? "",
+      sessionId: name,
+      dbName: `${String(dbName ?? "peerpigeon-storage-v1")}:${name}`,
+      signingKeys: options.signingKeys !== void 0 ? options.signingKeys : own,
+      ...options.owner ? { owner: options.owner } : {}
+    });
+    await storage.init();
+    this.openedStorages.add(storage);
+    if (this.useServers) {
+      storage.expectServers();
+      void (this.linking ?? Promise.resolve()).then(() => {
+        if (this.serverLink) return storage.attachServers(this.serverLink);
+      }).catch(() => {
+      });
+    }
+    return storage;
+  }
+  async linkServers() {
+    const until = Date.now() + 2e4;
+    while (!this.currentRelay() && Date.now() < until && this.storage) await new Promise((r) => setTimeout(r, 200));
+    if (!this.storage || this.serverLink) return;
+    const relay = this.currentRelay();
+    const signaling = relay ? { ...this.signalingOptions, signalingServer: relay, signalingServers: [relay], automaticSignalingServer: false } : this.signalingOptions;
+    this.serverLink = new StorageServerLink(_PeerPigeonNode.serverScopeNode(signaling, { dialRoles: [] }));
+    await this.storage.attachServers(this.serverLink);
+    await this.serverLink.start();
   }
   getConfig() {
     return this.mesh.getConfig();
@@ -7532,11 +8649,27 @@ var PeerPigeonNode = class {
   getConnectedPeers() {
     return this.mesh.getConnectedPeers();
   }
+  /**
+   * A direct message with bytes to a linked neighbour, in one binary frame: it arrives as a 'message'
+   * (kind 'direct') whose data is `meta` with `bytes` added. Only to a peer that reads them (one that
+   * asked for bytes); false when it can't go (not linked: send without bytes instead).
+   */
+  sendBytes(peerId, meta, bytes) {
+    return this.mesh.sendBytes(peerId, meta, bytes);
+  }
   getLinkLog() {
     return this.mesh.getLinkLog();
   }
   getDiscoveredPeers() {
     return this.mesh.getDiscoveredPeers();
+  }
+  /** The role a relay listed this peer with, or null. */
+  getPeerRole(peerId) {
+    return this.mesh.getPeerRole(peerId);
+  }
+  /** Dial this peer now, whatever its role. */
+  connectToPeer(peerId) {
+    this.mesh.connectToPeer(peerId);
   }
   getActiveSignalingPeers() {
     return this.mesh.getActiveSignalingPeers();
@@ -7570,6 +8703,11 @@ var PeerPigeonNode = class {
     if (!this.crypto) throw new Error("Crypto is disabled for this node");
     return await this.crypto.sendEncryptedDirect(peerId, plaintext, timeoutMs);
   }
+  /**
+   * This peer's identity, secret keys included: what makes it the owner of its
+   * records. Kept in this browser between visits; give it as crypto.keyPair on
+   * another device (or after clearing the browser) to be the same person there.
+   */
   getKeyPair() {
     if (!this.crypto) throw new Error("Crypto is disabled for this node");
     return this.crypto.getKeyPair();
@@ -7599,10 +8737,46 @@ var PeerPigeonNode = class {
   off(event, callback) {
     this.callbacks[event]?.delete(callback);
   }
+  /** This node's link to the storage servers (null with storage off, or storage.servers false). */
+  get storageServers() {
+    return this.serverLink;
+  }
+  /**
+   * A node in the storage servers' scope, on the same relays as this one: for
+   * a server (role 'storage', dialing other servers) or a peer's link to them.
+   */
+  static serverScopeNode(signaling, options = {}) {
+    const defined = Object.fromEntries(Object.entries(signaling).filter(([, v]) => v !== void 0));
+    return new _PeerPigeonNode({
+      ...defined,
+      networkId: STORAGE_SERVER_NETWORK,
+      sessionId: STORAGE_SERVER_ROOM,
+      minPeers: options.minPeers ?? 0,
+      maxPeers: options.maxPeers ?? 8,
+      role: options.role ?? null,
+      dialRoles: options.dialRoles ?? [],
+      crypto: false,
+      storage: false
+    });
+  }
+  /** A storage server on the same relays as this node's settings (see storage-servers.ts). */
+  static storageServer(signaling = {}, store) {
+    return new StorageServer(
+      _PeerPigeonNode.serverScopeNode(signaling, { role: STORAGE_SERVER_ROLE, dialRoles: [STORAGE_SERVER_ROLE], maxPeers: 32, minPeers: 0 }),
+      store
+    );
+  }
   async destroy() {
     if (this.relayScoreTimer) {
       clearInterval(this.relayScoreTimer);
       this.relayScoreTimer = null;
+    }
+    for (const opened of this.openedStorages) await opened.close().catch(() => {
+    });
+    this.openedStorages.clear();
+    if (this.serverLink) {
+      await this.serverLink.close();
+      this.serverLink = null;
     }
     if (this.storage) await this.storage.close();
     this.storage = null;
@@ -7670,6 +8844,9 @@ var PeerPigeonNode = class {
         message
       });
     });
+    this.mesh.on("peer:bytes", ({ peerId, meta, bytes }) => {
+      this.emit("message", { kind: "direct", data: { ...meta, bytes }, encrypted: false, local: false, fromPeerId: peerId, messageId: "", hops: 0, message: null });
+    });
     this.gossip.on("deliveryProgress", (status) => this.emit("deliveryProgress", status));
     this.gossip.on("deliveryComplete", (status) => this.emit("deliveryComplete", status));
     this.gossip.on("deliveryTimeout", (status) => this.emit("deliveryTimeout", status));
@@ -7726,7 +8903,9 @@ export {
   DEFAULT_CLOSE_SIGNALING_RELAY_COUNT,
   DEFAULT_SIGNALING_SERVERS,
   GossipProtocol,
+  MAX_BLOB_BYTES,
   MESH_SIGNAL_PAYLOAD_TYPE,
+  MemoryServerRecordStore,
   NEGOTIATION_ACTIVE_ICE_DEADLINE_MS,
   NEGOTIATION_DEAD_TRANSPORT_DEADLINE_MS,
   NEGOTIATION_OFFER_DEADLINE_MS,
@@ -7739,6 +8918,13 @@ export {
   RELAY_SWITCH_MARGIN,
   RELAY_VIRTUAL_IDS,
   RelayScoreBook,
+  STORAGE_REPLICAS,
+  STORAGE_SERVER_NETWORK,
+  STORAGE_SERVER_ROLE,
+  STORAGE_SERVER_ROOM,
+  StorageServer,
+  StorageServerLink,
+  blobAddress,
   chooseRelays,
   index_default as default,
   directRelaySupported,
@@ -7747,10 +8933,15 @@ export {
   discoverSignalingRelays,
   isHealthy,
   isMeshSignalPayload,
+  openBlob,
+  ownedRoomOf,
   rankSignalingServersByDistance,
   reachableFromThisPage,
+  relayDisplayName,
   relayScore,
   roomRoutingKey,
+  sealBlob,
   selectClosestSignalingServer,
-  sha1Hex
+  sha1Hex,
+  validRoom
 };

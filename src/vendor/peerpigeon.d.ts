@@ -1,3 +1,188 @@
+declare const STORAGE_SERVER_NETWORK = "peerpigeon-storage";
+declare const STORAGE_SERVER_ROOM = "servers";
+declare const STORAGE_SERVER_ROLE = "storage";
+/** Servers per room. */
+declare const STORAGE_REPLICAS = 3;
+/** One record as a server keeps it. Every field is a hash or ciphertext, except `at` and `once`. */
+interface ServerRecord {
+    /** sha256 of the room's secret: which room. */
+    room: string;
+    /** sha256 of the room's secret, space and key: which record. */
+    slot: string;
+    /** sha256 of the room's secret and space (16 hex): which space, for listing. */
+    tag: string;
+    /** When it was written (the mutation's timestamp, ms): a newer one replaces it. */
+    at: number;
+    /** The room-encrypted mutation. */
+    blob: unknown;
+    /** sha256 of the slot's write token. */
+    wh: string;
+    /** Write-once (frozen). */
+    once?: boolean;
+    /** A user record's owner (its signing key): only writes it signs replace it. */
+    owner?: string;
+    /** The owner's signature of ownerText(this record). */
+    osig?: string;
+}
+/** Largest blob: one message, base64, under a data channel's limit. */
+declare const MAX_BLOB_BYTES: number;
+/** Where a blob with this SHA-256 is kept (what servers see). */
+declare function blobAddress(hash: string): Promise<string>;
+/** Seals content for the servers: its address, and the bytes a server keeps. */
+declare function sealBlob(bytes: Uint8Array): Promise<{
+    hash: string;
+    address: string;
+    sealed: Uint8Array;
+}>;
+/** Opens a sealed blob; null unless it is the content with that SHA-256. */
+declare function openBlob(hash: string, sealed: Uint8Array): Promise<Uint8Array | null>;
+/**
+ * A room only one key writes to (a person's own records): 'o' and the hash of that key. A server
+ * takes a record for it only when the record carries that key as its owner, signed by it; so
+ * nobody else, knowing the key or not, can put anything in it.
+ */
+declare function ownedRoomOf(owner: string): Promise<string>;
+/** A room id: 64 hex (a shared room), or 'o' and 64 hex (an owned room). */
+declare function validRoom(v: unknown): v is string;
+type LinkListener = (event: {
+    type: 'servers';
+    room: string;
+    servers: string[];
+} | {
+    type: 'changed';
+    rec: Omit<ServerRecord, 'wh'>;
+}) => void;
+/**
+ * A peer's link to the storage servers: a small PeerPigeon node in the
+ * servers' scope that dials no one on its own, only the servers closest to the
+ * rooms it keeps.
+ */
+declare class StorageServerLink {
+    private readonly node;
+    private readonly hashed;
+    private readonly pending;
+    /** Servers that have sent us bytes (a blob, as bytes): they read them too. */
+    private readonly readsBytes;
+    private readonly listings;
+    private readonly rooms;
+    private readonly listeners;
+    private timer;
+    private closed;
+    constructor(node: PeerPigeonNode);
+    start(): Promise<void>;
+    close(): Promise<void>;
+    on(listener: LinkListener): () => void;
+    /** Keep this room: link to its closest servers, and hear of changes to it. */
+    keep(room: string): void;
+    /** The linked servers that keep this room, closest first. */
+    serversFor(room: string): string[];
+    /** Every server listed in the servers' scope. */
+    knownServers(): Promise<string[]>;
+    private refreshing;
+    private refreshAgain;
+    /** Looks again at the servers; one asked for while a look is under way runs after it. */
+    private refresh;
+    private refreshNow;
+    private emit;
+    private send;
+    private ask;
+    private failPending;
+    private onMessage;
+    /** Writes a record to the room's servers; resolves with how many took it. */
+    put(rec: Omit<ServerRecord, 'wh'>, write: string): Promise<number>;
+    /** The newest copy of a record the room's servers hold, or null. */
+    get(room: string, slot: string): Promise<Omit<ServerRecord, 'wh'> | null>;
+    /** The servers closest to a blob's address, linked (waits up to `waitMs` for new links). */
+    private serversForBlob;
+    /** Whether any server is known in the scope (linked or not). */
+    hasServers(): Promise<boolean>;
+    /** Keeps content on the servers closest to it; resolves with how many took it. */
+    putBlob(bytes: Uint8Array): Promise<number>;
+    /** Content by its SHA-256 from the servers, checked; null if none has it. */
+    getBlob(hash: string): Promise<Uint8Array | null>;
+    /** Every record the room's servers hold (of one space, with `tag`), the newest copy of each. */
+    list(room: string, tag?: string): Promise<Omit<ServerRecord, 'wh'>[]>;
+}
+/** Where a server keeps records: memory by default, a disk or a database in a real server. */
+interface ServerRecordStore {
+    get(room: string, slot: string): Promise<ServerRecord | null>;
+    put(rec: ServerRecord): Promise<void>;
+    list(room: string, tag?: string): Promise<ServerRecord[]>;
+    rooms(): Promise<string[]>;
+    /** Sealed blobs by address (a store without them keeps records only). */
+    getBlob?(address: string): Promise<Uint8Array | null>;
+    putBlob?(address: string, sealed: Uint8Array): Promise<void>;
+    blobs?(): Promise<string[]>;
+    blobUsage?(): Promise<{
+        count: number;
+        bytes: number;
+    }>;
+}
+declare class MemoryServerRecordStore implements ServerRecordStore {
+    private readonly byRoom;
+    get(room: string, slot: string): Promise<ServerRecord | null>;
+    put(rec: ServerRecord): Promise<void>;
+    list(room: string, tag?: string): Promise<ServerRecord[]>;
+    rooms(): Promise<string[]>;
+    private readonly blobMap;
+    getBlob(address: string): Promise<Uint8Array<ArrayBufferLike> | null>;
+    putBlob(address: string, sealed: Uint8Array): Promise<void>;
+    blobs(): Promise<string[]>;
+    blobUsage(): Promise<{
+        count: number;
+        bytes: number;
+    }>;
+}
+interface StorageServerStats {
+    rooms: number;
+    records: number;
+    blobs: number;
+    blobBytes: number;
+    servers: number;
+    clients: number;
+}
+/**
+ * A storage server: keeps the records of the rooms it is among the closest
+ * servers for, answers the peers linked to it, tells the peers watching a room
+ * what changed in it, and hands each room's records to whichever servers are
+ * closest to it as servers come and go.
+ */
+declare class StorageServer {
+    private readonly node;
+    private readonly store;
+    private readonly hashed;
+    private readonly watchers;
+    /** For each room: the servers last given its records. */
+    private readonly placed;
+    /** For each blob: the servers last given it. */
+    private readonly placedBlobs;
+    private selfHash;
+    private timer;
+    private onChange;
+    constructor(node: PeerPigeonNode, store?: ServerRecordStore);
+    /** Called with each record this server takes (a write, or one handed to it). */
+    onRecord(listener: (rec: ServerRecord) => void): void;
+    start(): Promise<void>;
+    close(): Promise<void>;
+    stats(): Promise<StorageServerStats>;
+    private self;
+    /** Every server known in the scope, this one included. */
+    private servers;
+    private send;
+    /** Takes a record if it is new or newer, and its write token (or hash) is the slot's. */
+    private take;
+    private onMessage;
+    private rebalancing;
+    private rebalanceAgain;
+    rebalance(): Promise<void>;
+    /**
+     * Hands each room's records to the servers now closest to it that were not
+     * given them yet: a server that joins gets the rooms it is now closest for,
+     * and when one leaves, the next closest gets its rooms.
+     */
+    private rebalanceNow;
+}
+
 /**
  * A path for signaling frames that does not go through the relay: the
  * mesh itself. `canRoute` says whether a frame for that peer has somewhere
@@ -551,6 +736,11 @@ interface StorageRecord<T = unknown> {
     ownerId: string | null;
     /** Mesh peer ID that most recently changed this record. */
     modifiedBy: string | null;
+    /**
+     * The key that signed this record (checked before it was taken), with signed storage.
+     * For a frozen record it is who wrote it: an account's key, when it was written after signAs.
+     */
+    signer?: string | null;
     createdAt: number;
     updatedAt: number;
     version: StorageVersion;
@@ -606,6 +796,41 @@ interface StorageOptions extends StorageSyncOptions {
      * Returning false drops remote storage updates for the given key.
      */
     syncFilter?: (space: StorageSpace, key: string, context: StorageSyncFilterContext) => boolean;
+    /**
+     * Key prefixes this node replicates in full (public and user spaces): it
+     * keeps every change to a key under them without subscribing to the key,
+     * and a neighbour that links up sends it every such record it holds (not
+     * only the keys this node already knew of), so a newcomer has the whole
+     * namespace at once.
+     */
+    replicate?: string[];
+    /**
+     * With storage servers: once the room's servers hold a record, drop the
+     * local copy unless this node uses it (subscribed, replicated, private),
+     * and read it from the servers when asked. Default: true.
+     */
+    moveToServers?: boolean;
+    /**
+     * With storage servers: how long a read of a record not kept here waits for
+     * the room's servers to be linked, right after joining (ms). Default 8000.
+     * Once they are linked, or the wait has run out once, reads do not wait.
+     */
+    serverWaitMs?: number;
+    /**
+     * A room of one key's own (a person's records): on the storage servers it takes only records
+     * that key signs, so nobody else can put anything in it. Writes here must be signed by it
+     * (signingKeys, or signAs). Give the room a sessionId of its own too.
+     */
+    owner?: string;
+    /**
+     * Signs every change this node makes, and accepts only signed changes from
+     * others: a record's signer is who made it, and a user record's owner is
+     * its signer's key (its ownerId). PeerPigeonNode passes its key pair.
+     */
+    signingKeys?: {
+        pub: string;
+        priv: string;
+    } | null;
 }
 type StorageEvents = {
     change: (event: {
@@ -652,6 +877,7 @@ declare class PeerPigeonStorage {
     private readonly syncSecret;
     private readonly dbName;
     private readonly syncFilter;
+    private readonly replicate;
     private readonly storeName;
     private driver;
     private readonly listeners;
@@ -663,6 +889,17 @@ declare class PeerPigeonStorage {
     private readonly retrieveAnswerTimes;
     private readonly pendingRetrieveRequests;
     private closed;
+    private readonly moveToServers;
+    private signingKeys;
+    private readonly ownSigningKeys;
+    private servers;
+    private serverIds;
+    private serversReady;
+    private readonly serverWaitMs;
+    private readonly owner;
+    private serversWait;
+    private serversWaitDone;
+    private migrating;
     private readonly onGossipMessageBound;
     private readonly instanceId;
     private crossTabChannel;
@@ -693,6 +930,62 @@ declare class PeerPigeonStorage {
     deleteSystem(space: StorageSpace, key: string): Promise<boolean>;
     list(space: StorageSpace): Promise<StorageRecord[]>;
     close(): Promise<void>;
+    /** Who this node acts as in a space: its signing key when it signs (a user record's owner), else its user id. */
+    private actorFor;
+    /** The id records this node owns carry: its signing key when it signs, else its user id. */
+    ownerIdentity(): string;
+    /** What a signature covers: everything a record says, but where it is kept. */
+    private signedText;
+    /** The key that signed a change, if its signature holds (and an upsert's time is its record's); else null. */
+    private verifiedSigner;
+    /**
+     * Uses storage servers (a link from storage-servers.ts) for this room: its
+     * records go to the room's closest servers, the ones already here are moved
+     * to them once they are there, and changes others make arrive from them.
+     */
+    attachServers(link: StorageServerLink): Promise<void>;
+    /**
+     * Sign this peer's changes as an account from now on: its keys (after the
+     * person signs in), so what they write is theirs on every device they sign
+     * in from. null goes back to the keys this storage started with (signing out).
+     */
+    signAs(keys: {
+        pub: string;
+        priv: string;
+    } | null): void;
+    /** Who signs this peer's changes now (an account's key after signAs), or null when unsigned. */
+    signer(): string | null;
+    /**
+     * Storage servers are on their way (the node is linking to them): until they
+     * are linked, or serverWaitMs has passed, a read of a record not kept here
+     * waits for them rather than finding nothing. A peer that comes back to a
+     * room where no other peer is online reads what it left on the servers.
+     */
+    expectServers(): void;
+    /** Whether the room's servers are linked, after waiting for them right after joining. */
+    private serversLinked;
+    /**
+     * Whether the room's servers are linked, as the link has it now. Asked each time rather than
+     * kept from the link's events, so a storage never goes on believing there are none.
+     */
+    private serversUp;
+    /** Whether the room's servers are linked now, and how many. */
+    serverCount(): number;
+    private slotOf;
+    /** Sends one change to the room's servers; resolves with how many took it. */
+    private pushToServers;
+    /** A record from a server: decrypted, checked like any change from the mesh, and kept here. */
+    private applyServerRecord;
+    private readFromServers;
+    /** The records of a space the room's servers keep, decrypted (not kept here). */
+    private listFromServers;
+    /**
+     * The room's servers came up: everything kept here (but private) goes to
+     * them, and, once they hold it, what this node does not use is dropped here.
+     */
+    private migrateToServers;
+    /** Whether this node keeps a record here even when servers hold it: one it subscribes to or replicates. */
+    private usesLocally;
     private applyLocalUpsert;
     private applyLocalDelete;
     private handleGossipMessage;
@@ -739,6 +1032,12 @@ declare class PeerPigeonStorage {
     private requireDriver;
     private normalizeKey;
     private makePk;
+    /**
+     * Whether a request or digest is this node's own. By mesh peer id when both
+     * sides have one: two tabs (or devices) of the same person share an identity,
+     * and each must still answer the other.
+     */
+    private fromSelf;
     private makeMutationId;
     private parseStorageVersion;
     private versionSourceToken;
@@ -770,6 +1069,8 @@ declare class PeerPigeonStorage {
      * the neighbour holds newer than ours.
      */
     private handleDigest;
+    /** Whether this node replicates a key in full (a `replicate` prefix). */
+    private replicates;
     private isCrossTabNotice;
     private isCipherPayload;
     private encryptSyncPayload;
@@ -827,11 +1128,17 @@ type PeerPigeonCryptoOptions = {
     roomId: string;
     /** Optional shared secret mixed into the room key. */
     roomSecret?: string;
-    /** Supply an identity instead of generating/loading a tab-scoped identity. */
+    /** Supply an identity (from exportIdentity() on another device) instead of the one kept here. */
     keyPair?: PeerPigeonKeyPair;
-    /** Persist generated keys in sessionStorage when available. Default true. */
-    persistKeyPair?: boolean;
-    /** sessionStorage key prefix. */
+    /**
+     * Where the identity is kept, so a peer is the same person when it comes back:
+     * 'local' (or true, the default) keeps it in localStorage, for every tab and
+     * visit of this browser; 'session' keeps it for this tab only; false keeps none.
+     * The records a peer owns (its user space, its private space) stay its own
+     * only while it keeps this identity.
+     */
+    persistKeyPair?: boolean | 'local' | 'session';
+    /** Storage key prefix for the kept identity. */
     storageKey?: string;
     /** Key advertisement interval. Default 10 seconds; 0 disables it. */
     announceIntervalMs?: number;
@@ -932,6 +1239,7 @@ declare class PeerPigeonCryptoProtocol {
     destroy(): void;
     static isProtocolPayload(value: unknown): boolean;
     private validateKeyPair;
+    private keyStores;
     private loadStoredKeyPair;
     private persistKeyPair;
     private registerLocalKey;
@@ -990,6 +1298,12 @@ declare function rankSignalingServersByDistance(peerId: string, relays: readonly
 /** Choose exactly one relay by node-ID XOR distance to the peer ID. */
 declare function selectClosestSignalingServer(peerId: string, relayUrls: readonly SignalingRelayCandidate[]): Promise<string>;
 /**
+ * A relay as a person reads it: the name a direct relay goes by when it has
+ * one (ef0d4c0a988ec0d2.decentralize.ooo), else the host of its URL, with its
+ * port when it is not the usual one.
+ */
+declare function relayDisplayName(url: string): string;
+/**
  * Every relay a bootstrap's registry (/api/v1/relays) lists, plus the
  * bootstrap and fallbacks, with what each says about itself: node ID, kind
  * (a relay behind NAT is local), and whether it can only be reached through
@@ -1038,6 +1352,17 @@ declare function discoverClosestSignalingServer(options: {
     timeoutMs?: number;
 }): Promise<string>;
 interface PartialMeshConfig {
+    /**
+     * What this peer is, said in its announce (capabilities.role) and listed by
+     * relays with it: a short lowercase word, such as 'storage'. Default: none.
+     */
+    role?: string | null;
+    /**
+     * Which roles this peer dials on its own: null (default) dials any peer;
+     * ['storage'] only peers listed with that role; [] none at all (it still
+     * answers dials, and connectToPeer still dials anyone).
+     */
+    dialRoles?: readonly string[] | null;
     /**
      * Minimum number of peers to maintain connections with
      */
@@ -1200,6 +1525,11 @@ type PartialMeshEvents = {
         peerId: string;
         data: any;
     }) => void;
+    'peer:bytes': (data: {
+        peerId: string;
+        meta: Record<string, unknown>;
+        bytes: Uint8Array;
+    }) => void;
     'peer:error': (data: {
         peerId: string;
         error: any;
@@ -1210,13 +1540,10 @@ type PartialMeshEvents = {
     'mesh:capacity': (capacities: PeerCapacitySnapshot[]) => void;
     'mesh:graph': (snapshot: PeerGraphSnapshot) => void;
 };
-/**
- * PartialMesh - WebRTC peer-to-peer partial mesh networking library
- *
- * Uses FreeRTC for signaling and maintains a configurable number of peer connections.
- */
 declare class PartialMesh {
     private config;
+    private readonly role;
+    private readonly dialRoles;
     private peers;
     private signalingClient;
     private discoveredPeers;
@@ -1408,6 +1735,10 @@ declare class PartialMesh {
      * Maintain the target number of peer connections
      */
     private dialCandidatePeerIds;
+    /** The role a relay listed this peer with (its announce's capabilities.role), or null. */
+    getPeerRole(peerId: string): string | null;
+    /** Whether this peer dials that one on its own (dialRoles). */
+    private dialsRole;
     private maintainPeerConnections;
     /**
      * Connect to a specific peer
@@ -1426,6 +1757,11 @@ declare class PartialMesh {
      * Send data to a specific peer
      */
     send(peerId: string, data: string | ArrayBuffer | ArrayBufferView): void;
+    /**
+     * A message with bytes to a linked neighbour, as one binary frame (no base64, no JSON escaping):
+     * false when the peer is not linked or the frame is refused. The receiver must read them (it said so).
+     */
+    sendBytes(peerId: string, meta: Record<string, unknown>, bytes: Uint8Array): boolean;
     /**
      * Broadcast data to all connected peers
      */
@@ -1538,6 +1874,12 @@ declare class PartialMesh {
 }
 type PeerPigeonNodeStorageOptions = Omit<StorageOptions, 'gossip' | 'peerId' | 'userId'> & {
     userId?: string;
+    /**
+     * Use storage servers when there are any (default: true): the room's
+     * records go to its closest servers, are read from them, and move to them
+     * from here (see storage-servers.ts). false keeps storage on the mesh alone.
+     */
+    servers?: boolean;
 };
 type PeerPigeonNodeOptions = PartialMeshConfig & {
     gossip?: GossipProtocolOptions;
@@ -1580,12 +1922,39 @@ declare class PeerPigeonNode {
     readonly crypto: PeerPigeonCryptoProtocol | null;
     storage: PeerPigeonStorage | null;
     private readonly storageOptions;
+    private readonly signalingOptions;
+    private serverLink;
+    private linking;
+    private storageUserId;
+    private readonly openedStorages;
     private readonly callbacks;
     private started;
     private relayScoreTimer;
     constructor(options?: PeerPigeonNodeOptions);
     init(): Promise<void>;
     start(): Promise<void>;
+    private useServers;
+    /** The relay this node is signalling through now ('' until it has one). */
+    currentRelay(): string;
+    /** The relay this node uses, as a person reads it (a direct relay by its name). */
+    currentRelayName(): string;
+    /**
+     * A storage room of its own (one person's records, say: name it after their key), kept on the
+     * same storage servers as this node's room. Listing it reads only what is in it, however much
+     * the node's room holds. Only the servers keep it: the mesh does not sync it.
+     * signingKeys: whose changes these are (an account's, after sign-in); by default this node's.
+     * owner: a key, for a room only that key writes to (the storage servers take nothing else in it);
+     * writes here must then be signed by it.
+     * Close it with storage.close() when done (the node closes those still open when it stops).
+     */
+    openStorage(sessionId: string, options?: {
+        signingKeys?: {
+            pub: string;
+            priv: string;
+        } | null;
+        owner?: string;
+    }): Promise<PeerPigeonStorage>;
+    private linkServers;
     getConfig(): Readonly<Required<PartialMeshConfig>>;
     updateConfig(patch: Partial<PartialMeshRuntimeConfig>): Readonly<Required<PartialMeshConfig>>;
     getGraphSnapshot(): PeerGraphSnapshot;
@@ -1597,6 +1966,12 @@ declare class PeerPigeonNode {
     getCecrState(): CecrStateSnapshot;
     getClientId(): string | null;
     getConnectedPeers(): string[];
+    /**
+     * A direct message with bytes to a linked neighbour, in one binary frame: it arrives as a 'message'
+     * (kind 'direct') whose data is `meta` with `bytes` added. Only to a peer that reads them (one that
+     * asked for bytes); false when it can't go (not linked: send without bytes instead).
+     */
+    sendBytes(peerId: string, meta: Record<string, unknown>, bytes: Uint8Array): boolean;
     getLinkLog(): {
         at: number;
         peer: string;
@@ -1606,6 +1981,10 @@ declare class PeerPigeonNode {
         links: number;
     }[];
     getDiscoveredPeers(): string[];
+    /** The role a relay listed this peer with, or null. */
+    getPeerRole(peerId: string): string | null;
+    /** Dial this peer now, whatever its role. */
+    connectToPeer(peerId: string): void;
     getActiveSignalingPeers(): string[];
     getGlobalPeers(): string[];
     broadcast(data: unknown, metadata?: Record<string, unknown>, options?: GossipBroadcastOptions): string;
@@ -1616,6 +1995,11 @@ declare class PeerPigeonNode {
     broadcastEncrypted(plaintext: string, metadata?: Record<string, unknown>, options?: GossipBroadcastOptions): Promise<string>;
     broadcastEncryptedReliable(plaintext: string, metadata?: Record<string, unknown>, options?: Omit<GossipBroadcastOptions, 'trackDelivery'>): Promise<string>;
     sendEncryptedDirect(peerId: string, plaintext: string, timeoutMs?: number): Promise<string>;
+    /**
+     * This peer's identity, secret keys included: what makes it the owner of its
+     * records. Kept in this browser between visits; give it as crypto.keyPair on
+     * another device (or after clearing the browser) to be the same person there.
+     */
     getKeyPair(): Readonly<PeerPigeonKeyPair>;
     getPublicKey(peerId: string): PeerPublicKey | null;
     getKnownPeerKeys(): PeerPublicKey[];
@@ -1624,6 +2008,15 @@ declare class PeerPigeonNode {
     recoverAfterInactivity(reason?: string): void;
     on<K extends keyof PeerPigeonNodeEvents>(event: K, callback: PeerPigeonNodeEvents[K]): void;
     off<K extends keyof PeerPigeonNodeEvents>(event: K, callback: PeerPigeonNodeEvents[K]): void;
+    /** This node's link to the storage servers (null with storage off, or storage.servers false). */
+    get storageServers(): StorageServerLink | null;
+    /**
+     * A node in the storage servers' scope, on the same relays as this one: for
+     * a server (role 'storage', dialing other servers) or a peer's link to them.
+     */
+    static serverScopeNode(signaling: Pick<PartialMeshConfig, 'signalingServer' | 'signalingServers' | 'automaticSignalingServer' | 'relayDirectory' | 'iceServers'>, options?: Pick<PartialMeshConfig, 'role' | 'dialRoles' | 'maxPeers' | 'minPeers'>): PeerPigeonNode;
+    /** A storage server on the same relays as this node's settings (see storage-servers.ts). */
+    static storageServer(signaling?: Pick<PartialMeshConfig, 'signalingServer' | 'signalingServers' | 'automaticSignalingServer' | 'relayDirectory' | 'iceServers'>, store?: ServerRecordStore): StorageServer;
     destroy(): Promise<void>;
     private bindComponentEvents;
     private isReservedPayload;
@@ -1631,4 +2024,4 @@ declare class PeerPigeonNode {
     private emit;
 }
 
-export { type CecrConfigSnapshot, type CecrMembershipRecordSnapshot, type CecrOverlaySnapshot, type CecrStateSnapshot, DEFAULT_CLOSE_SIGNALING_RELAY_COUNT, DEFAULT_SIGNALING_SERVERS, type EncryptedBroadcastPayload, type EncryptedDirectPayload, type GossipAggregateDeliveryStatus, type GossipBroadcastOptions, type GossipDeliveryStatus, type GossipMessage, GossipProtocol, type GossipProtocolOptions, type GossipStats, MESH_SIGNAL_PAYLOAD_TYPE, NEGOTIATION_ACTIVE_ICE_DEADLINE_MS, NEGOTIATION_DEAD_TRANSPORT_DEADLINE_MS, NEGOTIATION_OFFER_DEADLINE_MS, PartialMesh, type PartialMeshConfig, type PartialMeshEvents, type PartialMeshRuntimeConfig, type PeerCapacityAdvertisement, type PeerCapacitySnapshot, type PeerConnection, type PeerGraphEdge, type PeerGraphNode, type PeerGraphSnapshot, type PeerPigeonCryptoEvents, type PeerPigeonCryptoOptions, PeerPigeonCryptoProtocol, type PeerPigeonKeyPair, PeerPigeonNode, type PeerPigeonNodeEvents, type PeerPigeonNodeMessage, type PeerPigeonNodeOptions, type PeerPigeonNodeStorageOptions, PeerPigeonStorage, type PeerPublicKey, RELAY_CANDIDATES, RELAY_SCORE_STORAGE_KEY, RELAY_SWITCH_MARGIN, RELAY_VIRTUAL_IDS, type RelayInfo, type RelayKind, type RelayMeasurement, RelayScoreBook, type RoomCipher, type SharedRelayScore, type SignalingRelayCandidate, type StorageChangeOrigin, type StorageEvents, type StorageOptions, type StoragePutOptions, type StorageRecord, type StorageRetrieveOptions, type StorageSpace, type StorageSyncFilterContext, type StorageSyncOptions, type StorageUnsubscribe, chooseRelays, PartialMesh as default, directRelaySupported, discoverClosestSignalingServer, discoverClosestSignalingServers, discoverSignalingRelays, isHealthy, isMeshSignalPayload, rankSignalingServersByDistance, reachableFromThisPage, relayScore, roomRoutingKey, selectClosestSignalingServer, sha1Hex };
+export { type CecrConfigSnapshot, type CecrMembershipRecordSnapshot, type CecrOverlaySnapshot, type CecrStateSnapshot, DEFAULT_CLOSE_SIGNALING_RELAY_COUNT, DEFAULT_SIGNALING_SERVERS, type EncryptedBroadcastPayload, type EncryptedDirectPayload, type GossipAggregateDeliveryStatus, type GossipBroadcastOptions, type GossipDeliveryStatus, type GossipMessage, GossipProtocol, type GossipProtocolOptions, type GossipStats, MAX_BLOB_BYTES, MESH_SIGNAL_PAYLOAD_TYPE, MemoryServerRecordStore, NEGOTIATION_ACTIVE_ICE_DEADLINE_MS, NEGOTIATION_DEAD_TRANSPORT_DEADLINE_MS, NEGOTIATION_OFFER_DEADLINE_MS, PartialMesh, type PartialMeshConfig, type PartialMeshEvents, type PartialMeshRuntimeConfig, type PeerCapacityAdvertisement, type PeerCapacitySnapshot, type PeerConnection, type PeerGraphEdge, type PeerGraphNode, type PeerGraphSnapshot, type PeerPigeonCryptoEvents, type PeerPigeonCryptoOptions, PeerPigeonCryptoProtocol, type PeerPigeonKeyPair, PeerPigeonNode, type PeerPigeonNodeEvents, type PeerPigeonNodeMessage, type PeerPigeonNodeOptions, type PeerPigeonNodeStorageOptions, PeerPigeonStorage, type PeerPublicKey, RELAY_CANDIDATES, RELAY_SCORE_STORAGE_KEY, RELAY_SWITCH_MARGIN, RELAY_VIRTUAL_IDS, type RelayInfo, type RelayKind, type RelayMeasurement, RelayScoreBook, type RoomCipher, STORAGE_REPLICAS, STORAGE_SERVER_NETWORK, STORAGE_SERVER_ROLE, STORAGE_SERVER_ROOM, type ServerRecord, type ServerRecordStore, type SharedRelayScore, type SignalingRelayCandidate, type StorageChangeOrigin, type StorageEvents, type StorageOptions, type StoragePutOptions, type StorageRecord, type StorageRetrieveOptions, StorageServer, StorageServerLink, type StorageServerStats, type StorageSpace, type StorageSyncFilterContext, type StorageSyncOptions, type StorageUnsubscribe, blobAddress, chooseRelays, PartialMesh as default, directRelaySupported, discoverClosestSignalingServer, discoverClosestSignalingServers, discoverSignalingRelays, isHealthy, isMeshSignalPayload, openBlob, ownedRoomOf, rankSignalingServersByDistance, reachableFromThisPage, relayDisplayName, relayScore, roomRoutingKey, sealBlob, selectClosestSignalingServer, sha1Hex, validRoom };

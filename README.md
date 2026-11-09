@@ -196,6 +196,47 @@ caffeinate -is wurl --messages -p 50 --soak 28800 --signal ws://192.168.1.10:878
 * [00:05:36] round 1: broadcast 2450/2450 (100.0%), direct 50/50 (100.0%); 100/100 sent; median 30 ms, p95 140 ms
 ```
 
+## PigeonChess computer players (`--chess`)
+
+```
+wurl --chess -p 4 https://chess.peer.ooo/
+```
+
+Runs computer players for PigeonChess tournaments, until Ctrl-C. Each bot is a PeerPigeon peer in
+PigeonChess's mesh (`pigeonchess` / `global` unless `-n` / `-r` say otherwise), in its own Node process,
+with a key of its own kept in `~/.wurl/chess-bots/`, so it is the same player every run and its
+standings follow it. It plays with Stockfish 19 lite (the page's own engine) at its level.
+
+Bots sign up for every open tournament with room (`--join all`, the default), or the one named
+(`--join <id>`). They start a tournament that is due, are matched with whoever they still owe a game
+(a person on the page or another bot), play it, and report the result, all with PigeonChess's own code
+(`pigeonchess/bot`): the tournament records and messages a page uses, and its game messages, sealed with
+the game's seat key.
+
+| Option | |
+| --- | --- |
+| `--level <name>` | `easy`, `medium`, `hard`, `master`, or `mixed` (each bot a different one; default) |
+| `--join <id\|all>` | the tournaments to sign up for (default `all`) |
+| `--create <name>` | the first bot creates a round robin by this name, and the bots sign up |
+| `--players <n>` | with `--create`: it starts when n have signed up (default: the number of bots) |
+| `--clock <m+i>` | with `--create`: its time control (default `3+2`; `0` for no clock) |
+
+```
+* [00:00:09] wurlbot 1 (easy): created "Local test" (2h5h6d2431)
+* [00:00:11] wurlbot 2 (medium): signed up for "Local test"
+* [00:00:17] wurlbot 3 (hard): plays wurlbot 2 (medium) as white (1+0)
+* [00:00:24] wurlbot 3 (hard): 1/2-1/2 (draw, 98 moves) against wurlbot 2 (medium)
+* [00:01:09] standings
+    "Local test" finished, 3/3 games
+      1. wurlbot 2 (medium)      1.5  (1-1-0)
+      2. wurlbot 3 (hard)        1.5  (1-1-0)
+      3. wurlbot 1 (easy)          0  (0-0-2)
+```
+
+More than 5 bots on the public relays needs `--public-load`; for testing, use a local relay
+(`--signal ws://127.0.0.1:8788/ws`). `WURL_CHESS_DEBUG=1` adds each bot's links and the tournaments it
+knows, every 15 s.
+
 ## Tests
 
 ```

@@ -75,6 +75,17 @@ options:
       --hold             the peers join and stay until Ctrl-C: no messages, no pass or fail, one
                          status line updating in place. For testing the mesh by hand
       --wait <s>         with --messages: how long to wait for messages to arrive (default 20)
+      --chess            PigeonChess computer players: -p bots (default 2), each a PeerPigeon peer in
+                         PigeonChess's mesh with a key of its own (kept in ~/.wurl/chess-bots), that sign
+                         up for tournaments and play their games with Stockfish, until Ctrl-C. The mesh
+                         is pigeonchess / global unless -n / -r say otherwise.
+      --level <name>     with --chess: easy, medium, hard, master, or mixed (each bot a different one;
+                         default)
+      --join <id|all>    with --chess: the tournaments to sign up for: every open one with room (all,
+                         the default) or the one with this id
+      --create <name>    with --chess: the first bot creates a tournament by this name, and all sign up
+      --players <n>      with --create: it starts when n have signed up (default: the number of bots)
+      --clock <m+i>      with --create: its time control (default 3+2; 0 for no clock)
       --settle <s>       with --messages: how long the formed mesh must hold steady before anyone sends (default 3)
       --webrtc <engine>  with --messages: native (node-datachannel, C++), werift (JavaScript), or auto:
                          native when node-datachannel is installed, else werift (default auto).
@@ -117,6 +128,12 @@ try {
       json: { type: 'boolean', default: false },
       'public-load': { type: 'boolean', default: false },
       hold: { type: 'boolean', default: false },
+      chess: { type: 'boolean', default: false },
+      level: { type: 'string', default: 'mixed' },
+      join: { type: 'string', default: 'all' },
+      create: { type: 'string' },
+      players: { type: 'string' },
+      clock: { type: 'string', default: '3+2' },
       cost: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -149,7 +166,7 @@ try {
   process.exit(2);
 }
 
-const PEERS = Math.max(opt.messages ? 2 : 1, Number.parseInt(opt.peers ?? '', 10) || (opt.messages ? 10 : 1));
+const PEERS = Math.max(opt.messages || opt.chess ? 2 : 1, Number.parseInt(opt.peers ?? '', 10) || (opt.messages ? 10 : opt.chess ? 2 : 1));
 const CONNECT = Math.max(1, Number.parseInt(opt.connect, 10) || 4);
 const TIME_S = Math.max(1, Number(opt.time) || 20);
 const quiet = opt.silent || opt.json;
@@ -306,6 +323,38 @@ async function reportCost({ peers, links, json }) {
   if (json) console.log(JSON.stringify({ cost: rows, peers, links }, null, 2));
   else for (const line of formatCost(rows, { peers, links })) console.log(line);
   return rows;
+}
+
+// --chess: PigeonChess computer players, until Ctrl-C.
+if (opt.chess) {
+  const { runChessBots, parseClock, LEVELS } = await import('../src/chess.js');
+  if (opt.level !== 'mixed' && !LEVELS.includes(opt.level)) {
+    console.error(`wurl: --level is one of ${LEVELS.join(', ')} or mixed`);
+    process.exit(2);
+  }
+  const named = (key) => new URL(positionals[0].includes('://') ? positionals[0] : `https://${positionals[0]}`).searchParams.has(key);
+  const network = opt.network ?? (named('network') || named('networkName') ? target.network : 'pigeonchess');
+  const room = opt.room ?? (named('room') || named('sessionId') ? target.room : 'global');
+  if (PEERS > PUBLIC_PEER_LIMIT && !opt['public-load'] && (target.auto || !target.signalUrls.every((u) => /\/\/(127\.|localhost|192\.168\.|10\.)/.test(u)))) {
+    console.error(`wurl: ${PEERS} bots against a public relay: add --public-load, or use a local relay (--signal ws://127.0.0.1:8788/ws)`);
+    process.exit(2);
+  }
+  let create = null;
+  try {
+    if (opt.create) create = { name: opt.create, timeControl: parseClock(opt.clock), start: { kind: 'players', players: Math.max(2, Number.parseInt(opt.players ?? '', 10) || PEERS) }, maxPlayers: Math.max(PEERS, Number.parseInt(opt.players ?? '', 10) || PEERS) };
+  } catch (error) {
+    console.error(`wurl: ${error.message}`);
+    process.exit(2);
+  }
+  const say = (text) => console.log(text);
+  say(`* wurl --chess: ${PEERS} computer players (${opt.level}) on ${target.auto ? 'the relays PigeonChess pages use' : target.signalUrls.join(', ')}, ${network} / ${room}; ${create ? `creating "${create.name}"` : `signing up for ${opt.join === 'all' ? 'every open tournament' : `tournament ${opt.join}`}`}. Ctrl-C to stop.`);
+  const run = runChessBots({
+    bots: PEERS, level: opt.level, join: opt.join, create, prefix: 'wurlbot',
+    signalUrls: target.auto ? ['auto'] : target.signalUrls, network, room, engine: opt.webrtc, say,
+  });
+  process.on('SIGINT', () => { say('* stopping'); run.stop(); setTimeout(() => process.exit(0), 3000).unref(); });
+  await run.done;
+  process.exit(0);
 }
 
 if (opt.messages && opt.soak !== undefined) {
