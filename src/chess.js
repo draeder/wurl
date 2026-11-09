@@ -22,7 +22,8 @@ export function runChessBots({ bots, level, join, create, prefix, signalUrls, ne
     const lvl = level === 'mixed' ? LEVELS[i % LEVELS.length] : level;
     const name = `${prefix} ${i + 1} (${lvl})`;
     const config = {
-      i, name, level: lvl, network, room, join, engine,
+      // --create: every bot is in that one tournament (and stops when it is over).
+      i, name, level: lvl, network, room, join: create ? create.name : join, engine,
       signalUrl: signalUrls[i % signalUrls.length] ?? 'auto',
       create: i === 0 && create ? create : null,
     };
