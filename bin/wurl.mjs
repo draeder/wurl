@@ -251,8 +251,30 @@ if (target.auto && (opt.messages || opt.chess)) {
       target.signalUrl = 'auto';
       target.signalUrls = ['auto'];
     }
-  } else if (!quiet) {
-    console.error(`wurl: no relay in the DNS directory; using ${target.signalUrl}`);
+  } else {
+    // Not in the DNS directory: every federated relay is a bootstrap, so ask the federation which relays
+    // there are (GET /api/v1/relays, one request) and use the home relays (relay_kind 'local', not a
+    // cloud relay) that answer from here: no Cloudflare request limit on those.
+    const base = String(target.signalUrl || '').replace(/^ws(s?):\/\//, 'http$1://').replace(/\/ws(\?.*)?$/, '');
+    const federated = await fetch(`${base}/api/v1/relays`, { signal: AbortSignal.timeout(5_000) })
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const homes = (Array.isArray(federated?.relays) ? federated.relays : Array.isArray(federated) ? federated : [])
+      .filter((relay) => relay?.relay_kind === 'local' && /^wss?:\/\//.test(String(relay.url || '')));
+    const answers = await Promise.all(homes.map((relay) => fetch(`${relay.url.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/ws$/, '')}/health`, { signal: AbortSignal.timeout(4_000) })
+      .then((r) => r.ok).catch(() => false)));
+    const reachable = homes.filter((_, i) => answers[i]).map((relay) => relay.url);
+    if (!quiet) {
+      console.error(`wurl: no relay in the DNS directory; federated home relays${homes.length ? '' : ': none'}`);
+      for (const [i, relay] of homes.entries()) console.error(`  ${answers[i] ? 'reachable  ' : 'no answer  '} ${relay.name || String(relay.node_id || '').slice(0, 8)} ${relay.url}`);
+    }
+    if (reachable.length) {
+      target.signalUrls = reachable;
+      target.signalUrl = reachable[0];
+      target.chosen = true;
+      if (!quiet) console.error(`wurl: peers use ${reachable.length === 1 ? 'the federated home relay' : 'the federated home relays'} ${reachable.join(', ')}`);
+    } else if (!quiet) {
+      console.error(`wurl: no federated home relay answers; using ${target.signalUrl}`);
+    }
   }
 }
 

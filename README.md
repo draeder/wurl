@@ -202,7 +202,7 @@ caffeinate -is wurl --messages -p 50 --soak 28800 --signal ws://192.168.1.10:878
 wurl --chess -p 4 https://chess.peer.ooo/
 ```
 
-Runs computer players for PigeonChess tournaments, until Ctrl-C. Each bot is a PeerPigeon peer in
+Runs computer players for PigeonChess tournaments, until Ctrl-C. With no relay named, they use relays from the DNS relay directory, else the federated home relays (every federated relay is a bootstrap: `GET /api/v1/relays` on the page's relay lists them), else the page's own relay. Each bot is a PeerPigeon peer in
 PigeonChess's mesh (`pigeonchess` / `global` unless `-n` / `-r` say otherwise), in its own Node process,
 with a key of its own kept in `~/.wurl/chess-bots/`, so it is the same player every run and its
 standings follow it. It plays with Stockfish 19 lite (the page's own engine) at its level.
