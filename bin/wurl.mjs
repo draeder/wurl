@@ -14,18 +14,17 @@ function isLocalRelay(url) {
     // .test is reserved (RFC 2606): never a public relay, so test hostnames count as local.
     return host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.test') || host === '::1'
       || host === 'host.docker.internal' || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
-      || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
-      // A home relay's own https name (freertc: its node id's first 16 hex, under a relay domain, as
-      // ef0d4c0a988ec0d2.decentralize.ooo): someone's own Node relay, not a cloud one with a daily limit.
-      || /^[0-9a-f]{16}\.[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(host);
+      || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
   } catch {
     return false;
   }
 }
 
-// Many peers against a public relay can use up its whole daily request limit
-// (a 50-peer test spent the free plan's 100,000 in an hour). Up to this many
-// is a test; more needs --public-load, or a local relay via --signal.
+// Many peers against a public relay can use up its daily limits and slow every app on it (a
+// 50-peer test spent the free plan's 100,000 requests in an hour). Up to this many is a test;
+// more needs a relay on this machine or network, or a relay of yours and its owner's load-test
+// pass (--load-pass, from console.peerpigeon.io). Relays also refuse more than a few peers from
+// one address without one (freertc src/relay-limits.js).
 const PUBLIC_PEER_LIMIT = 5;
 
 const HELP = `usage: wurl [options] <url>
@@ -45,9 +44,11 @@ options:
                          as Cloudflare would bill the same relay code
   -p, --peers <n>        run n peers in this process (default 1, or 10 with --messages); they also
                          connect to each other.
-                         More than ${PUBLIC_PEER_LIMIT} against a public relay needs --public-load
-      --public-load      allow more than ${PUBLIC_PEER_LIMIT} peers against a public relay (each peer's
-                         signaling counts against that relay's daily request limit)
+                         More than ${PUBLIC_PEER_LIMIT} need a relay on this machine or network, or --load-pass
+      --load-pass <pass> load-test a public relay of yours: the pass console.peerpigeon.io makes for it
+                         (Relays → the relay → Load test), with --signal naming that relay. Only its
+                         owner can make one; it runs out when the console said, and the relay keeps
+                         the test's peers to itself (nothing reaches other relays)
   -c, --connect <n>      connections each peer dials, at most (default 4)
   -t, --time <s>         longest run, in seconds (default 20); wurl stops sooner once
                          every peer has settled (connected or failed, round trips measured)
@@ -132,7 +133,7 @@ try {
       verbose: { type: 'boolean', short: 'v', default: false },
       silent: { type: 'boolean', short: 's', default: false },
       json: { type: 'boolean', default: false },
-      'public-load': { type: 'boolean', default: false },
+      'load-pass': { type: 'string' },
       hold: { type: 'boolean', default: false },
       chess: { type: 'boolean', default: false },
       level: { type: 'string', default: 'mixed' },
@@ -192,10 +193,9 @@ if (target.auto && (opt.messages || opt.chess)) {
       console.error(`wurl: relays from the DNS directory (peers choose; each falls back on its own):`);
       for (const record of listed) console.error(`  ${record.name || record.node_id.slice(0, 8)}  ${directoryRecordUrl(record).split('&tunnel=')[0]}`);
     }
-    if (PEERS > PUBLIC_PEER_LIMIT && !opt['public-load']) {
-      // A stress run: directory relays only, never a cloud relay or a
-      // tunnel (both count against Cloudflare's request limit). A relay on
-      // this machine, else on this network, else all of them round robin.
+    if (PEERS > PUBLIC_PEER_LIMIT) {
+      // A stress run: a relay on this machine, else directory relays on this
+      // network, never a cloud relay, a tunnel, or anyone else's relay.
       const { networkInterfaces } = await import('node:os');
       const mine = Object.values(networkInterfaces()).flat().filter((entry) => entry && entry.family === 'IPv4' && !entry.internal).map((entry) => entry.address);
       const lanHosts = (record) => (record.lan || []).map((endpoint) => endpoint.split(':')[0]);
@@ -226,13 +226,14 @@ if (target.auto && (opt.messages || opt.chess)) {
           return false;
         }
       };
-      const answered = await Promise.all(listed.map(reaches));
-      const reachable = listed.filter((_, i) => answered[i]);
       const rank = (record) => (here.includes(record) ? 0 : nearby.includes(record) ? 1 : 2);
+      // Only this machine's and this network's: someone else's relay is theirs to load-test.
+      const answered = await Promise.all(listed.map((record) => (rank(record) < 2 ? reaches(record) : false)));
+      const reachable = listed.filter((_, i) => answered[i]);
       reachable.sort((a, b) => rank(a) - rank(b));
       if (!quiet) {
         for (const [i, record] of listed.entries()) {
-          console.error(`  ${answered[i] ? 'reachable  ' : 'no answer  '} ${record.name || record.node_id.slice(0, 8)} ${noTunnel(record).split('?')[0].replace(/\/sha256\/.*/, '')}${here.includes(record) ? ' (this machine)' : nearby.includes(record) ? ' (this network)' : ''}`);
+          console.error(`  ${answered[i] ? 'reachable  ' : rank(record) < 2 ? 'no answer  ' : 'not yours  '} ${record.name || record.node_id.slice(0, 8)} ${noTunnel(record).split('?')[0].replace(/\/sha256\/.*/, '')}${here.includes(record) ? ' (this machine)' : nearby.includes(record) ? ' (this network)' : ''}`);
         }
       }
       if (localFree) {
@@ -241,9 +242,11 @@ if (target.auto && (opt.messages || opt.chess)) {
         const best = rank(reachable[0]);
         target.signalUrls = reachable.filter((record) => rank(record) === best).map(noTunnel);
       } else {
-        console.error('wurl: no relay in the DNS directory answers from here, and none runs on this machine; start one (node scripts/node-relay.mjs in freertc)');
+        console.error('wurl: no relay on this machine or network answers; start one (FREERTC_FEDERATION=off npx freertc dev),');
+        console.error('  or load-test a relay of yours with --signal <it> --load-pass <its pass from console.peerpigeon.io>');
         process.exit(6);
       }
+      target.nearby = new Set(target.signalUrls);
       target.signalUrl = target.signalUrls[0];
       target.chosen = true;
       if (!quiet) console.error(`wurl: stress run: peers use ${localFree ? `the relay on this machine, at ws://127.0.0.1:8788 (federated as ${localUrl})` : `${target.signalUrls.length === 1 ? 'the reachable relay' : 'the reachable relays'} ${rank(reachable[0]) === 0 ? 'on this machine' : rank(reachable[0]) === 1 ? 'on this network' : 'elsewhere'}`} only, no cloud relay or tunnel`);
@@ -251,7 +254,7 @@ if (target.auto && (opt.messages || opt.chess)) {
       target.signalUrl = 'auto';
       target.signalUrls = ['auto'];
     }
-  } else {
+  } else if (PEERS <= PUBLIC_PEER_LIMIT) {
     // Not in the DNS directory: every federated relay is a bootstrap, so ask the federation which relays
     // there are (GET /api/v1/relays, one request) and use the home relays (relay_kind 'local', not a
     // cloud relay) that answer from here: no Cloudflare request limit on those.
@@ -278,10 +281,61 @@ if (target.auto && (opt.messages || opt.chess)) {
   }
 }
 
-if (PEERS > PUBLIC_PEER_LIMIT && !target.signalUrls.every((url) => url === 'auto' || url.startsWith('webrtc-direct://') || isLocalRelay(url)) && !opt['public-load']) {
-  console.error(`wurl: ${PEERS} peers against the public relay ${target.signalUrl} would count against its daily request limit.`);
-  console.error(`  Run them against a local relay instead:  --signal ws://127.0.0.1:8788/ws`);
-  console.error(`  (start one with: node scripts/node-relay.mjs in freertc), or add --public-load to do it anyway.`);
+// A load test of a relay of yours: the pass must be for the relay --signal names, signed by the
+// key it was claimed with, and running. The peers then carry it (?load_test=), and the relay lets
+// them past its limits and keeps them to itself.
+let loadPass = null;
+if (opt['load-pass']) {
+  const [nodeId, until, sig] = String(opt['load-pass']).trim().split('.');
+  loadPass = { nodeId, until: Number(until), sig };
+  if (!/^[0-9a-f]{64}$/.test(nodeId || '') || !Number.isSafeInteger(loadPass.until) || !sig) {
+    console.error('wurl: that is not a load-test pass; copy it from console.peerpigeon.io (Relays → the relay → Load test)');
+    process.exit(2);
+  }
+  if (!opt.signal) {
+    console.error('wurl: --load-pass needs --signal <the relay it is for>');
+    process.exit(2);
+  }
+  const { verifyOwnerProof } = await import('freertc/relay-owner');
+  const { formatLoadTestPass, loadTestText } = await import('freertc/relay-limits');
+  const { verifyMessage } = await import('unsea');
+  const { randomBytes } = await import('node:crypto');
+  const problem = async (url) => {
+    if (loadPass.until <= Date.now()) return 'the pass has run out; make another in the console';
+    const nonce = randomBytes(16).toString('hex');
+    const base = url.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/ws(\?.*)?$/, '');
+    const answer = await fetch(`${base}/api/v1/owner?nonce=${nonce}`, { signal: AbortSignal.timeout(8_000) }).then((r) => r.json()).catch(() => null);
+    if (!answer?.ok) return 'it does not say who owns it (an older relay, or not reachable)';
+    if (!answer.owner) return 'nobody has claimed it (npx freertc claim <account key>)';
+    if (!(await verifyOwnerProof(answer, { nonce, owner: answer.owner }))) return 'its answer about its owner does not check out';
+    if (answer.node_id !== loadPass.nodeId) return 'the pass is for another relay';
+    try {
+      if (!(await verifyMessage(loadTestText(loadPass.nodeId, loadPass.until), loadPass.sig, answer.owner))) return 'the pass is not signed by its owner';
+    } catch { return 'the pass is not signed by its owner'; }
+    return null;
+  };
+  for (const url of target.signalUrls) {
+    if (isLocalRelay(url)) continue;
+    const why = await problem(url);
+    if (why) {
+      console.error(`wurl: not load-testing ${url}: ${why}`);
+      process.exit(2);
+    }
+  }
+  const query = formatLoadTestPass(loadPass.until, loadPass.sig);
+  target.signalUrls = target.signalUrls.map((url) => {
+    const u = new URL(url);
+    u.searchParams.set('load_test', query);
+    return u.toString();
+  });
+  target.signalUrl = target.signalUrls[0];
+  if (!quiet) console.error(`wurl: load test of your relay ${opt.signal}, until ${new Date(loadPass.until).toLocaleString()}; its peers stay on it`);
+}
+
+if (PEERS > PUBLIC_PEER_LIMIT && !loadPass && !target.signalUrls.every((url) => isLocalRelay(url) || target.nearby?.has(url))) {
+  console.error(`wurl: ${PEERS} peers on ${target.signalUrl}: more than ${PUBLIC_PEER_LIMIT} only on a relay on this machine or network,`);
+  console.error(`  or on a relay of yours with its load-test pass: --signal <your relay> --load-pass <pass from console.peerpigeon.io>.`);
+  console.error(`  A local relay: FREERTC_FEDERATION=off npx freertc dev, then --signal ws://127.0.0.1:8788/ws`);
   process.exit(2);
 }
 const many = PEERS > 1;
