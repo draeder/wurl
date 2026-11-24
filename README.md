@@ -202,7 +202,7 @@ caffeinate -is wurl --messages -p 50 --soak 28800 --signal ws://192.168.1.10:878
 wurl --chess -p 4 https://chess.peer.ooo/
 ```
 
-Runs computer players for PigeonChess tournaments, until Ctrl-C. With no relay named, they use relays from the DNS relay directory, else the federated home relays (every federated relay is a bootstrap: `GET /api/v1/relays` on the page's relay lists them), else the page's own relay. Each bot is a PeerPigeon peer in
+Runs computer players for PigeonChess tournaments, until Ctrl-C. They use the relay `--signal` names, and only that one. With none named, they use the relay on this machine, else relays from the DNS relay directory, else the federated home relays (every federated relay is a bootstrap: `GET /api/v1/relays` on the page's relay lists them); never a cloud relay, which is billed for every hour a connection stays open, and bots stay for hours. Each bot is a PeerPigeon peer in
 PigeonChess's mesh (`pigeonchess` / `global` unless `-n` / `-r` say otherwise), in its own Node process,
 with a key of its own kept in `~/.wurl/chess-bots/`, so it is the same player every run and its
 standings follow it. It plays with Stockfish 19 lite (the page's own engine) at its level.
@@ -239,8 +239,7 @@ it), and wurl exits when the last one has, after printing the final standings. `
       3. wurlbot 1 (easy)          0  (0-0-2)
 ```
 
-More than 5 bots on the public relays needs `--public-load`; for testing, use a local relay
-(`--signal ws://127.0.0.1:8788/ws`). `WURL_CHESS_DEBUG=1` adds each bot's links and the tournaments it
+For testing, use a local relay (`--signal ws://127.0.0.1:8788/ws`). `WURL_CHESS_DEBUG=1` adds each bot's links and the tournaments it
 knows, every 15 s.
 
 ## Tests

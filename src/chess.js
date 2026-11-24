@@ -24,7 +24,7 @@ export function runChessBots({ bots, level, join, create, prefix, signalUrls, ne
     const config = {
       // --create: every bot is in that one tournament (and stops when it is over).
       i, name, level: lvl, network, room, join: create ? create.name : join, engine,
-      signalUrl: signalUrls[i % signalUrls.length] ?? 'auto',
+      signalUrl: signalUrls[i % signalUrls.length],
       create: i === 0 && create ? create : null,
     };
     const child = fork(fileURLToPath(new URL('./chess-bot.js', import.meta.url)), [], {

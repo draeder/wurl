@@ -66,8 +66,11 @@ const chooseMove = (fen, msLeft) => new Promise((resolve) => {
 
 const node = new PeerPigeonNode({
   networkId: network, sessionId: room,
-  ...(signalUrl === 'auto' ? {} : { signalingServer: signalUrl }),
-  automaticSignalingServer: true,
+  // Only the relay wurl chose. automaticSignalingServer put the bots on PeerPigeon's default relays
+  // (four Cloudflare Workers) whatever --signal said, and a tournament kept their Durable Objects
+  // billed for as long as it ran.
+  signalingServer: signalUrl,
+  automaticSignalingServer: false,
   minPeers: 2, maxPeers: 10,
   // Every tournament record kept here too, as on a page (pigeonchess utils/tournament.ts KEYS).
   crypto: {}, storage: { replicate: [chess.KEYS] },

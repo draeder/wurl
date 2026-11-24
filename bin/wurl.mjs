@@ -81,7 +81,9 @@ options:
       --chess            PigeonChess computer players: -p bots (default 2), each a PeerPigeon peer in
                          PigeonChess's mesh with a key of its own (kept in ~/.wurl/chess-bots), that sign
                          up for tournaments and play their games with Stockfish, until Ctrl-C. The mesh
-                         is pigeonchess / global unless -n / -r say otherwise.
+                         is pigeonchess / global unless -n / -r say otherwise. The bots use only the relay
+                         --signal names; with none, the relay on this machine or a home relay, never a
+                         cloud relay (billed for every hour a connection stays open)
       --level <name>     with --chess: easy, medium, hard, master, or mixed (each bot a different one;
                          default)
       --join <name|id|all>  with --chess: the tournaments to sign up for: every open one with room (all,
@@ -192,8 +194,8 @@ if (target.auto && (opt.messages || opt.chess)) {
       console.error(`wurl: relays from the DNS directory (peers choose; each falls back on its own):`);
       for (const record of listed) console.error(`  ${record.name || record.node_id.slice(0, 8)}  ${directoryRecordUrl(record).split('&tunnel=')[0]}`);
     }
-    if (PEERS > PUBLIC_PEER_LIMIT && !opt['public-load']) {
-      // A stress run: directory relays only, never a cloud relay or a
+    if ((PEERS > PUBLIC_PEER_LIMIT && !opt['public-load']) || opt.chess) {
+      // A stress run, or computer players (which stay for hours): directory relays only, never a cloud relay or a
       // tunnel (both count against Cloudflare's request limit). A relay on
       // this machine, else on this network, else all of them round robin.
       const { networkInterfaces } = await import('node:os');
@@ -272,6 +274,12 @@ if (target.auto && (opt.messages || opt.chess)) {
       target.signalUrl = reachable[0];
       target.chosen = true;
       if (!quiet) console.error(`wurl: peers use ${reachable.length === 1 ? 'the federated home relay' : 'the federated home relays'} ${reachable.join(', ')}`);
+    } else if (opt.chess) {
+      // Computer players stay for hours: never on a cloud relay (it is billed for every hour a
+      // connection stays open), unless --signal names one.
+      console.error('wurl: no relay on this machine or a federated home relay answers; start one (npx freertc dev),');
+      console.error('  or name one with --signal');
+      process.exit(6);
     } else if (!quiet) {
       console.error(`wurl: no federated home relay answers; using ${target.signalUrl}`);
     }
@@ -385,11 +393,11 @@ if (opt.chess) {
     process.exit(2);
   }
   const say = (text) => console.log(text);
-  say(`* wurl --chess: ${PEERS} computer players (${opt.level}) on ${target.auto && !target.chosen ? 'the relays PigeonChess pages use' : target.signalUrls.join(', ')}, ${network} / ${room}; ${create ? `creating "${create.name}"` : `signing up for ${opt.join === 'all' ? 'every open tournament' : `"${opt.join}"`}`}. Ctrl-C to stop.`);
+  say(`* wurl --chess: ${PEERS} computer players (${opt.level}) on ${target.signalUrls.join(', ')}, ${network} / ${room}; ${create ? `creating "${create.name}"` : `signing up for ${opt.join === 'all' ? 'every open tournament' : `"${opt.join}"`}`}. Ctrl-C to stop.`);
   const run = runChessBots({
     bots: PEERS, level: opt.level, join: opt.join, create, prefix: 'wurlbot',
-    // A big run: the relays found above (this machine's, else this network's); otherwise each bot picks as a page does.
-    signalUrls: target.auto && !target.chosen ? ['auto'] : target.signalUrls, network, room, engine: opt.webrtc, say,
+    // The relays found above (this machine's, else a home relay's), or the one --signal names: never a cloud relay by default.
+    signalUrls: target.signalUrls, network, room, engine: opt.webrtc, say,
   });
   process.on('SIGINT', () => { say('* stopping'); run.stop(); setTimeout(() => process.exit(0), 3000).unref(); });
   await run.done;
