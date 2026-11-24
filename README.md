@@ -68,7 +68,7 @@ or a relay URL (`wss://host/ws`). The network and room come from `?network=` and
 | `-v, --verbose` | also show freertc's own signaling and WebRTC log |
 | `-s, --silent` | only the summary |
 | `--json` | the summary as JSON |
-| `--load-pass <pass>` | load-test a public relay of yours, with `--signal` naming it: the pass the console makes for it (below) |
+| `--public-load` | allow more than 5 peers against a public relay |
 
 Exit status, curl-style: `0` every peer registered and connected to at least
 one other; `6` the relay couldn't be reached; `7` signaling failed before
@@ -79,31 +79,14 @@ were found but none connected.
 
 Run big tests against a local relay: every peer's signaling counts against a
 public relay's daily request limit, and a 50-peer test once used up the free
-plan's 100,000 requests in an hour. Start one with federation off, so nothing
-reaches the public relays (`FREERTC_FEDERATION=off npx freertc dev`), then:
+plan's 100,000 requests in an hour. Start a relay (`node scripts/node-relay.mjs`
+in freertc), then:
 
 ```
 wurl -p 50 -t 60 --signal ws://127.0.0.1:8788/ws "https://decentralize.ooo/?network=network:test&room=room-vsmtj78m"
 ```
 
-More than 5 peers need a relay on this machine or network, or a relay of yours
-and its load-test pass. Relays also refuse more than a few peers from one address
-on their own (64 connections at once, 16 in a room, 60 new a minute).
-
-### Load-testing a relay of yours
-
-On [console.peerpigeon.io](https://console.peerpigeon.io), Relays → your relay →
-**Load test** makes a pass for that relay, signed with your account's key, for as
-long as you choose (up to a day). It shows the command:
-
-```
-wurl -p 200 -m --signal wss://your-relay.example/ws --load-pass <pass> "https://decentralize.ooo/?network=network:test&room=load"
-```
-
-wurl checks the pass first: for this relay, signed by the key it was claimed with
-(`npx freertc claim`), not run out. The relay lets the test's peers past its limits
-and keeps them to itself: they are not published to the federation, not listed to
-other relays, and nothing they send goes to another relay.
+wurl refuses more than 5 peers against a public relay unless you add `--public-load`.
 
 This runs 50 peers in one process. Locally, 20 wurl peers formed one mesh using
 169 MB in total, about 8 MB a peer. The summary reports links per peer, whether
@@ -256,8 +239,8 @@ it), and wurl exits when the last one has, after printing the final standings. `
       3. wurlbot 1 (easy)          0  (0-0-2)
 ```
 
-More than 5 bots need a local relay (`--signal ws://127.0.0.1:8788/ws`) or a relay of yours and
-its load-test pass (`--load-pass`). `WURL_CHESS_DEBUG=1` adds each bot's links and the tournaments it
+More than 5 bots on the public relays needs `--public-load`; for testing, use a local relay
+(`--signal ws://127.0.0.1:8788/ws`). `WURL_CHESS_DEBUG=1` adds each bot's links and the tournaments it
 knows, every 15 s.
 
 ## Tests
