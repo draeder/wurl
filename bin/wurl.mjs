@@ -44,7 +44,8 @@ options:
                          as Cloudflare would bill the same relay code
   -p, --peers <n>        run n peers in this process (default 1, or 10 with --messages); they also
                          connect to each other.
-                         More than ${PUBLIC_PEER_LIMIT} need a relay on this machine or network, or --load-pass
+                         More than ${PUBLIC_PEER_LIMIT} need a home relay (the federation lists it as relay_kind
+                         local), a relay on this machine or network, or --load-pass
       --load-pass <pass> load-test a public relay of yours: the pass console.peerpigeon.io makes for it
                          (Relays → the relay → Load test), with --signal naming that relay. Only its
                          owner can make one; it runs out when the console said, and the relay keeps
@@ -340,8 +341,33 @@ if (opt['load-pass']) {
   if (!quiet) console.error(`wurl: load test of your relay ${opt.signal}, until ${new Date(loadPass.until).toLocaleString()}; its peers stay on it`);
 }
 
+// A home relay (the federation lists it as relay_kind 'local': a relay someone runs on their own machine,
+// not a Cloudflare one) can take more than a few peers too. Asked of the relay itself (its own list of the
+// federation), so not even this question goes to a cloud relay.
+const baseOf = (url) => url.replace(/^ws(s?):\/\//, 'http$1://').replace(/\/ws(\?.*)?$/, '').replace(/\?.*$/, '');
+async function isHomeRelay(url) {
+  const base = baseOf(url);
+  // Its own word first (/health: a cloud relay says 'cloud'), then the federation's list.
+  const health = await fetch(`${base}/health`, { signal: AbortSignal.timeout(5_000) }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (health?.relay_kind === 'local') return true;
+  if (health?.relay_kind === 'cloud') return false;
+  const listed = await fetch(`${base}/api/v1/relays`, { signal: AbortSignal.timeout(5_000) })
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const relays = Array.isArray(listed?.relays) ? listed.relays : Array.isArray(listed) ? listed : [];
+  return relays.some((relay) => relay?.relay_kind === 'local' && baseOf(String(relay.url || '')) === base);
+}
+if (PEERS > PUBLIC_PEER_LIMIT && !loadPass) {
+  for (const url of target.signalUrls) {
+    if (isLocalRelay(url) || target.nearby?.has(url)) continue;
+    if (await isHomeRelay(url)) {
+      (target.nearby ??= new Set()).add(url);
+      if (!quiet) console.error(`wurl: ${baseOf(url)} is a home relay (relay_kind local): no Cloudflare limit on its peers`);
+    }
+  }
+}
+
 if (PEERS > PUBLIC_PEER_LIMIT && !loadPass && !target.signalUrls.every((url) => isLocalRelay(url) || target.nearby?.has(url))) {
-  console.error(`wurl: ${PEERS} peers on ${target.signalUrl}: more than ${PUBLIC_PEER_LIMIT} only on a relay on this machine or network,`);
+  console.error(`wurl: ${PEERS} peers on ${target.signalUrl}: more than ${PUBLIC_PEER_LIMIT} only on a home relay (relay_kind local), a relay on this machine or network,`);
   console.error(`  or on a relay of yours with its load-test pass: --signal <your relay> --load-pass <pass from console.peerpigeon.io>.`);
   console.error(`  A local relay: FREERTC_FEDERATION=off npx freertc dev, then --signal ws://127.0.0.1:8788/ws`);
   process.exit(2);
